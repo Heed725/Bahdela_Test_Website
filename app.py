@@ -146,9 +146,9 @@ SITES = {
         "device_ip": "217.29.138.128:4373",
         "username": "admin",
         "password": "Bahdela01",
-        "dept_order": ["Oil","Supermarket","Security","Cleaner","Manager"],
+        "dept_order": ["Oil","Supermarket","Security","Cleaner"],
         "dept_colors": {"Oil":"#4B0082","Supermarket":"#8B0000","Security":"#1A3A5C",
-                        "Cleaner":"#2E6B3E","Manager":"#7B3F00"},
+                        "Cleaner":"#2E6B3E"},
         "employees": {
             "Oil": {
                 "label":"OIL", "shift":"Shifts: 07:00-14:00 | 14:00-19:00 | 19:00-06:00",
@@ -184,13 +184,6 @@ SITES = {
                 "header_hex":"2E6B3E",
                 "members":[
                     "Ladslaus Nestor Andreas",
-                ],
-            },
-            "Manager": {
-                "label":"MANAGER", "shift":"Shift: 08:00 - 17:00",
-                "header_hex":"7B3F00",
-                "members":[
-                    "Maryam Yahya Ally",
                 ],
             },
         },
@@ -333,6 +326,34 @@ SITES = {
         },
     },
 }
+
+# ── HARD CONFIG CLEANUP ──────────────────────────────────────
+def sanitize_puma_upanga_config():
+    """Keep Upanga Manager-free and ensure Maryam appears once in Supermarket."""
+    upanga = SITES.get("Puma Upanga", {})
+    employees = upanga.get("employees", {})
+
+    # Remove the retired Manager department from every configuration source.
+    employees.pop("Manager", None)
+    upanga["dept_order"] = [
+        dept for dept in upanga.get("dept_order", []) if dept != "Manager"
+    ]
+    upanga.get("dept_colors", {}).pop("Manager", None)
+
+    # Remove Maryam from all Upanga groups first, then add her once to Supermarket.
+    maryam = "Maryam Yahya Ally"
+    for department in employees.values():
+        department["members"] = [
+            name for name in department.get("members", [])
+            if name.strip().casefold() != maryam.casefold()
+        ]
+
+    supermarket = employees.get("Supermarket")
+    if supermarket is not None:
+        supermarket.setdefault("members", []).append(maryam)
+
+
+sanitize_puma_upanga_config()
 
 # ── Runtime site selection (resolved after sidebar renders) ───
 # These are set dynamically in the UI section below; defaults here
@@ -959,7 +980,9 @@ if "show_settings" not in st.session_state:
 # ── Resolve site config ───────────────────────────────────────
 site_cfg      = SITES[st.session_state.selected_site]
 ALL_EMPLOYEES = site_cfg["employees"]
-DEPT_ORDER    = site_cfg["dept_order"]
+# Puma Upanga must never display the retired Manager department in the UI or reports.
+DEPT_ORDER    = [dk for dk in site_cfg["dept_order"]
+                 if not (st.session_state.selected_site == "Puma Upanga" and dk == "Manager")]
 DEPT_COLORS   = site_cfg["dept_colors"]
 device_ip     = site_cfg["device_ip"]
 username      = site_cfg["username"]
@@ -980,7 +1003,8 @@ with st.sidebar:
 
         site_cfg      = SITES[st.session_state.selected_site]
         ALL_EMPLOYEES = site_cfg["employees"]
-        DEPT_ORDER    = site_cfg["dept_order"]
+        DEPT_ORDER    = [dk for dk in site_cfg["dept_order"]
+                         if not (st.session_state.selected_site == "Puma Upanga" and dk == "Manager")]
         DEPT_COLORS   = site_cfg["dept_colors"]
 
         st.markdown("---")
@@ -1111,7 +1135,7 @@ if st.button("Generate Reports"):
     # ── Summary cards ─────────────────────────────────────────
     progress.progress(0.65)
     total_present=len(rows)
-    all_members=sum(len(d["members"]) for d in ALL_EMPLOYEES.values())
+    all_members=sum(len(ALL_EMPLOYEES[dk]["members"]) for dk in DEPT_ORDER)
     st.markdown("### Summary")
     m1,m2,m3,m4,m5=st.columns(5)
     m1.metric("Days", num_days)
