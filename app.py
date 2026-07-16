@@ -122,9 +122,10 @@ st.markdown(f"""
   /* Download buttons stay white with dark visible text. */
   .stDownloadButton > button {{
     background-color:#FFFFFF !important; color:#8B0000 !important;
-    border:1px solid #B8860B !important; border-radius:7px;
-    font-size:13px; font-weight:bold; padding:7px 14px;
-    min-height:42px; width:100%;
+    border:2px solid #8B0000 !important; border-radius:8px;
+    font-size:14px; font-weight:800; padding:9px 14px;
+    min-height:46px; width:100%;
+    box-shadow:0 2px 6px rgba(90,0,0,.08);
   }}
   .stDownloadButton > button p,
   .stDownloadButton > button span,
@@ -137,9 +138,49 @@ st.markdown(f"""
   [data-baseweb="select"] > div {{ background:#FFFFFF !important; color:{TXT} !important; }}
   hr {{ border-color:#D8C4A7 !important; }}
   .stProgress > div > div {{ background-color:#8B0000 !important; }}
-  .stTabs [data-baseweb="tab"] {{ color:{H2_COL}; font-weight:bold; white-space:nowrap; }}
-  .stTabs [aria-selected="true"] {{ border-bottom:2px solid #8B0000 !important; color:#8B0000 !important; }}
-  .stTabs [data-baseweb="tab-list"] {{ overflow-x:auto; }}
+  /* Make report choices look like clear, high-contrast buttons. */
+  .stTabs [data-baseweb="tab-list"] {{
+    display:flex !important;
+    flex-wrap:wrap !important;
+    gap:10px !important;
+    overflow-x:visible !important;
+    padding:4px 0 10px 0 !important;
+  }}
+  .stTabs [data-baseweb="tab"] {{
+    flex:1 1 210px !important;
+    justify-content:center !important;
+    min-height:48px !important;
+    padding:10px 16px !important;
+    background:#FFFFFF !important;
+    border:2px solid #8B0000 !important;
+    border-radius:9px !important;
+    color:#8B0000 !important;
+    font-weight:800 !important;
+    white-space:nowrap !important;
+    box-shadow:0 2px 6px rgba(90,0,0,.08);
+  }}
+  .stTabs [data-baseweb="tab"] p,
+  .stTabs [data-baseweb="tab"] span,
+  .stTabs [data-baseweb="tab"] div {{
+    color:#8B0000 !important;
+    font-weight:800 !important;
+  }}
+  .stTabs [data-baseweb="tab"]:hover {{
+    background:#FFF7F2 !important;
+    border-color:#C0392B !important;
+  }}
+  .stTabs [data-baseweb="tab"][aria-selected="true"] {{
+    background:#8B0000 !important;
+    border-color:#8B0000 !important;
+    color:#FFFFFF !important;
+    box-shadow:0 3px 9px rgba(90,0,0,.18);
+  }}
+  .stTabs [data-baseweb="tab"][aria-selected="true"] p,
+  .stTabs [data-baseweb="tab"][aria-selected="true"] span,
+  .stTabs [data-baseweb="tab"][aria-selected="true"] div {{
+    color:#FFFFFF !important;
+  }}
+  .stTabs [data-baseweb="tab-highlight"] {{ display:none !important; }}
 
   /* Site choices replace the old separate Switch buttons. */
   div[data-testid="stRadio"] [role="radiogroup"] {{
@@ -181,6 +222,15 @@ st.markdown(f"""
   }}
 
   @media (max-width: 768px) {{
+    .stTabs [data-baseweb="tab"] {{
+      flex:1 1 100% !important;
+      min-height:50px !important;
+      font-size:14px !important;
+    }}
+    .stDownloadButton > button {{
+      min-height:48px !important;
+      font-size:14px !important;
+    }}
     .block-container {{ padding:0.8rem 0.7rem 1.7rem 0.7rem; }}
     h1 {{ font-size:1.65rem !important; line-height:1.2 !important; }}
     [data-testid="column"] {{ min-width:0 !important; }}
@@ -620,35 +670,35 @@ def checkin_fill(dept_key,check_in):
         else:           ss = 1140 # night 19:00
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFF2CC","333333"
+        return "FFFFFF","333333"
     # Oil Supervisor: 06:00-18:00 or 18:00-06:00
     if dept_key == "Oil Supervisor":
         ss = 360 if ci < 720 else 1080
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFF2CC","333333"
+        return "FFFFFF","333333"
     # Oil Logistics: 08:00-17:00
     if dept_key == "Oil Logistics":
         ss = 480
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFF2CC","333333"
+        return "FFFFFF","333333"
     # Security/Walinzi: 24hr or two-shift
     if dept_key in ("Walinzi","Security"):
         ss = 480 if 480 <= ci < 960 else 960
         if ci < ss:     return "C6EFCE","276221"
         if ci > ss+60:  return "FFCCCC","CC0000"
-        return "FFF2CC","333333"
+        return "FFFFFF","333333"
     # Supermarket: 08:00-17:00 or 17:00-07:00
     if dept_key == "Supermarket":
         ss = 480 if ci < 1020 else 1020
         if ci < ss:     return "C6EFCE","276221"
         if ci > ss+60:  return "FFCCCC","CC0000"
-        return "FFF2CC","333333"
+        return "FFFFFF","333333"
     # Default day-shift depts (Shop, Manufactural, Store, Cleaner, Wakala, Manager, Accountant)
     if ci < 495: return "C6EFCE","276221"
     if ci > 540: return "FFCCCC","CC0000"
-    return "FFF2CC","333333"
+    return "FFFFFF","333333"
 
 def style_viewer_dataframe(dataframe, dept_key):
     """Apply the report's attendance colours to the on-screen viewer."""
@@ -1545,7 +1595,8 @@ if st.button("View / Generate Reports"):
 
     # ── Viewer and downloads ──────────────────────────────────
     st.markdown("### Report Options")
-    viewer_tab, downloads_tab = st.tabs(["Viewer", "Downloads"])
+    st.caption("Choose a button below to view the report on screen or download report files.")
+    viewer_tab, downloads_tab = st.tabs(["👁  View Reports", "⬇  Download Reports"])
 
     with viewer_tab:
         current_local = local_now()
@@ -1653,14 +1704,14 @@ if st.button("View / Generate Reports"):
         with daily_download_tab:
             d1,d2,d3=st.columns(3)
             with d1:
-                st.download_button("Download Word (.docx)",data=docx_daily,
+                st.download_button("⬇ Download Word (.docx)",data=docx_daily,
                     file_name=f"{site_label}_Daily_{tag}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             with d2:
-                st.download_button("Download PDF",data=pdf_daily,
+                st.download_button("⬇ Download PDF",data=pdf_daily,
                     file_name=f"{site_label}_Daily_{tag}.pdf",mime="application/pdf")
             with d3:
-                st.download_button("Download Excel (.xlsx)",data=xlsx_daily,
+                st.download_button("⬇ Download Excel (.xlsx)",data=xlsx_daily,
                     file_name=f"{site_label}_Daily_{tag}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1669,14 +1720,14 @@ if st.button("View / Generate Reports"):
                         unsafe_allow_html=True)
             d1,d2,d3=st.columns(3)
             with d1:
-                st.download_button("Download Word (.docx)",data=docx_summ,
+                st.download_button("⬇ Download Word (.docx)",data=docx_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             with d2:
-                st.download_button("Download PDF",data=pdf_summ,
+                st.download_button("⬇ Download PDF",data=pdf_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",mime="application/pdf")
             with d3:
-                st.download_button("Download Excel (.xlsx)",data=xlsx_summ,
+                st.download_button("⬇ Download Excel (.xlsx)",data=xlsx_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
