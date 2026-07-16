@@ -6,6 +6,7 @@ Run with:  python app.py   OR   streamlit run app.py
 
 import streamlit as st
 import requests
+import pandas as pd
 from requests.auth import HTTPDigestAuth
 import urllib3
 import io, sys, subprocess, os
@@ -35,13 +36,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Tanzania uses UTC+03:00 throughout the year. Using a fixed offset keeps the
 # current-day morning/afternoon logic reliable on Windows and Linux servers.
 APP_TIMEZONE = timezone(timedelta(hours=3))
-MORNING_CHECKOUT_CUTOFF_HOUR = 12
+MORNING_CHECKOUT_CUTOFF_HOUR = 14
 
 def local_now():
     return datetime.now(APP_TIMEZONE)
 
 def hide_current_day_checkout(day_str, now_value=None):
-    """Hide today's checkout before 12:00 Tanzania time."""
+    """Hide today's checkout before 14:00 Tanzania time."""
     now_value = now_value or local_now()
     return (
         day_str == now_value.date().isoformat()
@@ -498,6 +499,39 @@ def checkin_fill(dept_key,check_in):
     if ci > 540: return "FFCCCC","CC0000"
     return "FFFFFF","333333"
 
+def style_viewer_dataframe(dataframe, dept_key):
+    """Apply the report's attendance colours to the on-screen viewer."""
+    columns = list(dataframe.columns)
+    check_in_index = columns.index("Check In")
+
+    def style_row(row):
+        styles = ["" for _ in columns]
+
+        # Absent staff use the same grey styling as exported reports.
+        if row.get("Status") == "Absent":
+            return [
+                "background-color: #EEEEEE; color: #999999;"
+                for _ in columns
+            ]
+
+        check_in = str(row.get("Check In") or "").strip()
+        if check_in:
+            background, text_colour = checkin_fill(dept_key, check_in)
+            styles[check_in_index] = (
+                f"background-color: #{background}; "
+                f"color: #{text_colour}; font-weight: 700;"
+            )
+        return styles
+
+    return (
+        dataframe.style
+        .apply(style_row, axis=1)
+        .set_properties(**{
+            "border-color": "#D4A017",
+            "vertical-align": "middle",
+        })
+    )
+
 def hex2rgb(h):
     h=h.lstrip("#"); return tuple(int(h[i:i+2],16) for i in (0,2,4))
 def hex2rl(h):
@@ -535,7 +569,7 @@ def parse_by_day(events):
             ci=times[0]
             raw_co=times[-1] if len(times)>1 else "-"
             # During today's morning hours, every scan is treated as a check-in.
-            # Checkout and worked hours become visible from 12:00 onward.
+            # Checkout and worked hours become visible from 14:00 onward.
             co="-" if hide_current_day_checkout(day_str, now_value) else raw_co
             rows.append({"name":emp_names[emp_id],"employee_id":emp_id,
                          "date":day_str,"check_in":ci,"check_out":co,
@@ -1295,12 +1329,25 @@ if st.button("View / Generate Reports"):
             if current_local.hour < MORNING_CHECKOUT_CUTOFF_HOUR:
                 st.info(
                     "Morning view: check-in times are shown. Checkout and hours worked "
-                    "remain blank until 12:00 PM Tanzania time."
+                    "remain blank until 2:00 PM Tanzania time."
                 )
             else:
                 st.caption(
                     "Afternoon/evening view: recorded check-in and checkout times are shown."
                 )
+
+        st.markdown(
+            """
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:4px 0 14px 0;">
+              <span style="font-weight:700;">Check-in key:</span>
+              <span style="background:#C6EFCE;color:#276221;padding:4px 10px;border:1px solid #9BCB9F;border-radius:4px;">Early</span>
+              <span style="background:#FFFFFF;color:#333333;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">On time</span>
+              <span style="background:#FFCCCC;color:#CC0000;padding:4px 10px;border:1px solid #E6A0A0;border-radius:4px;">Late</span>
+              <span style="background:#EEEEEE;color:#777777;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">Absent</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         daily_view_tab, summary_view_tab = st.tabs([
             f"Daily Attendance ({num_days} day{'s' if num_days > 1 else ''})",
@@ -1343,14 +1390,17 @@ if st.button("View / Generate Reports"):
                         })
 
                     if viewer_rows:
+                        viewer_columns = [
+                            "Status", "Employee Name", "ID",
+                            "Check In", "Check Out", "Hours Worked",
+                        ]
+                        viewer_df = pd.DataFrame(viewer_rows, columns=viewer_columns)
+                        styled_viewer = style_viewer_dataframe(viewer_df, dk)
                         st.dataframe(
-                            viewer_rows,
+                            styled_viewer,
                             hide_index=True,
                             use_container_width=True,
-                            column_order=[
-                                "Status", "Employee Name", "ID",
-                                "Check In", "Check Out", "Hours Worked",
-                            ],
+                            column_order=viewer_columns,
                         )
                 view_day += timedelta(days=1)
 
