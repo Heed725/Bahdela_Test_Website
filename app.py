@@ -9,7 +9,7 @@ import requests
 import pandas as pd
 from requests.auth import HTTPDigestAuth
 import urllib3
-import io, sys, subprocess, os
+import io, sys, subprocess, os, re
 from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
 
@@ -33,21 +33,16 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Tanzania uses UTC+03:00 throughout the year. Using a fixed offset keeps the
-# current-day morning/afternoon logic reliable on Windows and Linux servers.
+# Tanzania uses UTC+03:00 throughout the year.
 APP_TIMEZONE = timezone(timedelta(hours=3))
-MORNING_CHECKOUT_CUTOFF_HOUR = 14
+
+# A checkout must be recorded at the allocated shift end or later. The grace
+# window prevents a scan from the following workday being mistaken for checkout.
+CHECKOUT_GRACE_HOURS = 8
+SHIFT_TIME_PATTERN = re.compile(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})")
 
 def local_now():
     return datetime.now(APP_TIMEZONE)
-
-def hide_current_day_checkout(day_str, now_value=None):
-    """Hide today's checkout before 14:00 Tanzania time."""
-    now_value = now_value or local_now()
-    return (
-        day_str == now_value.date().isoformat()
-        and now_value.hour < MORNING_CHECKOUT_CUTOFF_HOUR
-    )
 
 # ── AUTO-LAUNCH ────────────────────────────────────────────────
 # Only relaunch if we were NOT already started by streamlit.
@@ -63,46 +58,112 @@ if os.environ.get("_APP_LAUNCHED") != "1":
 # ── PAGE CONFIG ───────────────────────────────────────────────
 st.set_page_config(page_title="Shift Reports — Multi-Site", layout="wide")
 
-# ── THEME STATE ───────────────────────────────────────────────
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
-
-dark = st.session_state.dark_mode
-BG      = "#1a1a1a"  if dark else "#f4f1ec"
-SIDEBAR = "#111111"  if dark else "#e8e0d0"
-CARD_BG = "#2a1a1a"  if dark else "#fff8f0"
-H1_COL  = "#FFF3CD"  if dark else "#5a0000"
-H2_COL  = "#D4A017"  if dark else "#8B4500"
-TXT     = "#dddddd"  if dark else "#2d2d2d"
-MUTED   = "#888888"  if dark else "#777777"
-INP_BG  = "#2a2a2a"  if dark else "#ffffff"
-DL_BG   = "#2c2c2c"  if dark else "#ffffff"
+# ── LIGHT-ONLY RESPONSIVE THEME ───────────────────────────────
+BG       = "#F7F7F5"
+SURFACE  = "#FFFFFF"
+SIDEBAR  = "#FAF8F4"
+PRIMARY  = "#8B0000"
+PRIMARY2 = "#A52A2A"
+GOLD     = "#B8860B"
+TXT      = "#252525"
+MUTED    = "#6F6F6F"
+BORDER   = "#E5E1DA"
 
 st.markdown(f"""
 <style>
-  .stApp                          {{ background-color:{BG}; color:{TXT}; }}
-  [data-testid="stSidebar"]       {{ background-color:{SIDEBAR}; }}
-  h1,h2,h3,h4                     {{ font-family:Arial,sans-serif; }}
-  h1                              {{ color:{H1_COL} !important; }}
-  h2,h3,h4                        {{ color:{H2_COL} !important; }}
-  p,label,div                     {{ color:{TXT}; font-family:Arial,sans-serif; }}
-  [data-testid="stMetric"]        {{ background:{CARD_BG}; border:1px solid #8B0000;
-                                     border-radius:8px; padding:12px 16px; }}
-  [data-testid="stMetricLabel"]   {{ color:{H2_COL} !important; font-size:13px; }}
-  [data-testid="stMetricValue"]   {{ color:{H1_COL} !important; font-size:24px; font-weight:bold; }}
-  .stButton > button              {{ background-color:#8B0000; color:#FFF3CD; border:none;
-                                     border-radius:6px; font-weight:bold; font-size:14px;
-                                     padding:8px 20px; width:100%; }}
-  .stButton > button:hover        {{ background-color:#C0392B; }}
-  .stDownloadButton > button      {{ background-color:{DL_BG}; color:#FFF3CD;
-                                     border:1px solid #D4A017; border-radius:6px;
-                                     font-size:13px; padding:7px 16px; width:100%; }}
-  .stDownloadButton > button:hover{{ background-color:#3a2800; color:#FFF3CD; }}
-  input                           {{ background-color:{INP_BG} !important; color:{TXT} !important; }}
-  hr                              {{ border-color:#8B0000 !important; }}
-  .stProgress > div > div         {{ background-color:#8B0000 !important; }}
-  .stTabs [data-baseweb="tab"]    {{ color:{H2_COL}; font-weight:bold; }}
-  .stTabs [aria-selected="true"]  {{ border-bottom:2px solid #8B0000 !important; color:#8B0000 !important; }}
+  :root {{ color-scheme: light only; }}
+  html, body, [class*="css"] {{ font-family: Inter, Arial, sans-serif; }}
+  .stApp {{ background:{BG}; color:{TXT}; }}
+  .block-container {{ max-width:1500px; padding-top:1.4rem; padding-bottom:2.5rem; }}
+  [data-testid="stSidebar"] {{ background:{SIDEBAR}; border-right:1px solid {BORDER}; }}
+  [data-testid="stSidebar"] .block-container {{ padding-top:1.2rem; }}
+
+  h1,h2,h3,h4 {{ color:{TXT} !important; letter-spacing:-0.02em; }}
+  p,label,div,span {{ color:{TXT}; }}
+  small,.muted {{ color:{MUTED} !important; }}
+
+  .hero {{
+    background:{SURFACE}; border:1px solid {BORDER}; border-left:5px solid {PRIMARY};
+    border-radius:16px; padding:20px 22px; margin:4px 0 18px 0;
+    box-shadow:0 8px 24px rgba(40,30,20,.05);
+  }}
+  .hero-title {{ font-size:clamp(1.55rem,3vw,2.25rem); font-weight:800; line-height:1.15; }}
+  .hero-subtitle {{ color:{MUTED} !important; margin-top:7px; font-size:.96rem; }}
+  .site-badge {{
+    display:inline-block; margin-top:11px; padding:5px 10px; border-radius:999px;
+    background:#F7ECEC; color:{PRIMARY} !important; font-weight:700; font-size:.78rem;
+  }}
+  .section-title {{ font-size:1.05rem; font-weight:800; margin:20px 0 8px 0; }}
+
+  [data-testid="stMetric"] {{
+    background:{SURFACE}; border:1px solid {BORDER}; border-radius:14px;
+    padding:14px 16px; box-shadow:0 4px 16px rgba(40,30,20,.035);
+  }}
+  [data-testid="stMetricLabel"] {{ color:{MUTED} !important; font-size:.78rem; }}
+  [data-testid="stMetricValue"] {{ color:{PRIMARY} !important; font-size:1.55rem; font-weight:800; }}
+
+  .stButton > button {{
+    min-height:44px; width:100%; background:{PRIMARY}; color:#FFFFFF;
+    border:1px solid {PRIMARY}; border-radius:10px; font-weight:750;
+    box-shadow:0 4px 12px rgba(139,0,0,.12);
+  }}
+  .stButton > button:hover {{ background:{PRIMARY2}; border-color:{PRIMARY2}; color:#FFFFFF; }}
+  .stDownloadButton > button {{
+    min-height:42px; width:100%; background:{SURFACE}; color:{PRIMARY};
+    border:1px solid #D9B7B7; border-radius:10px; font-weight:700;
+  }}
+  .stDownloadButton > button:hover {{ background:#FBF2F2; color:{PRIMARY}; border-color:{PRIMARY}; }}
+
+  [data-baseweb="select"] > div,
+  [data-baseweb="input"] > div,
+  [data-testid="stDateInput"] input,
+  input {{ background:#FFFFFF !important; color:{TXT} !important; border-radius:10px !important; }}
+  [data-testid="stExpander"] {{ background:{SURFACE}; border:1px solid {BORDER}; border-radius:12px; }}
+  [data-testid="stDataFrame"] {{ background:{SURFACE}; border:1px solid {BORDER}; border-radius:12px; overflow:hidden; }}
+
+  .stTabs [data-baseweb="tab-list"] {{ gap:8px; overflow-x:auto; }}
+  .stTabs [data-baseweb="tab"] {{
+    color:{MUTED}; font-weight:700; background:#F0EEE9; border-radius:9px;
+    padding:8px 14px; white-space:nowrap;
+  }}
+  .stTabs [aria-selected="true"] {{ color:{PRIMARY} !important; background:#F7ECEC !important; }}
+
+  .dept-grid {{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr));
+    gap:10px; margin:10px 0 18px 0;
+  }}
+  .dept-card {{
+    background:{SURFACE}; border:1px solid {BORDER}; border-top:4px solid var(--dept);
+    border-radius:13px; padding:12px 12px 11px; min-height:102px;
+    box-shadow:0 4px 14px rgba(40,30,20,.035);
+  }}
+  .dept-name {{ color:{MUTED} !important; font-size:.72rem; font-weight:800; text-transform:uppercase; }}
+  .dept-count {{ color:var(--dept) !important; font-size:1.7rem; font-weight:850; margin-top:4px; }}
+  .dept-total {{ color:{MUTED} !important; font-size:.74rem; }}
+  .dept-heading {{
+    background:{SURFACE}; border:1px solid {BORDER}; border-left:4px solid var(--dept);
+    border-radius:10px; padding:9px 12px; margin:13px 0 7px 0;
+  }}
+  .dept-heading strong {{ color:{TXT} !important; }}
+  .dept-heading span {{ color:{MUTED} !important; font-size:.82rem; }}
+
+  hr {{ border-color:{BORDER} !important; }}
+  .stProgress > div > div {{ background-color:{PRIMARY} !important; }}
+
+  @media (max-width: 768px) {{
+    .block-container {{ padding:1rem .75rem 2rem .75rem; }}
+    .hero {{ padding:16px; border-radius:13px; }}
+    .hero-subtitle {{ font-size:.88rem; }}
+    [data-testid="column"] {{ min-width:0 !important; }}
+    [data-testid="stMetric"] {{ padding:11px 12px; }}
+    [data-testid="stMetricValue"] {{ font-size:1.3rem; }}
+    .dept-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
+    .dept-card {{ min-height:92px; padding:10px; }}
+    .stButton > button,.stDownloadButton > button {{ min-height:46px; }}
+  }}
+  @media (max-width: 420px) {{
+    .dept-grid {{ grid-template-columns:1fr; }}
+  }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -459,6 +520,60 @@ def to_min(t):
     try: h,m=t.split(":"); return int(h)*60+int(m)
     except: return None
 
+def get_shift_pairs(dept_key):
+    """Return configured (start_minute, end_minute) shift pairs."""
+    shift_text = str(ALL_EMPLOYEES.get(dept_key, {}).get("shift", ""))
+    pairs = []
+    for start_text, end_text in SHIFT_TIME_PATTERN.findall(shift_text):
+        start_min = to_min(start_text)
+        end_min = to_min(end_text)
+        if start_min is not None and end_min is not None:
+            pairs.append((start_min, end_min))
+    return pairs
+
+def get_shift_window(dept_key, check_in_dt):
+    """Resolve the most likely allocated shift window for a check-in scan."""
+    pairs = get_shift_pairs(dept_key)
+    if not pairs:
+        pairs = [(8 * 60, 17 * 60)]
+
+    check_in_minute = check_in_dt.hour * 60 + check_in_dt.minute
+
+    def circular_distance(start_minute):
+        difference = abs(check_in_minute - start_minute)
+        return min(difference, 1440 - difference)
+
+    start_minute, end_minute = min(
+        pairs,
+        key=lambda pair: circular_distance(pair[0]),
+    )
+
+    signed_offset = ((start_minute - check_in_minute + 720) % 1440) - 720
+    midnight = check_in_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    shift_start = midnight + timedelta(minutes=check_in_minute + signed_offset)
+
+    duration_minutes = (end_minute - start_minute) % 1440
+    if duration_minutes == 0:
+        duration_minutes = 1440
+    shift_end = shift_start + timedelta(minutes=duration_minutes)
+    return shift_start, shift_end
+
+def parse_event_datetime(value):
+    """Parse a device event timestamp and normalize it to Tanzania time."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=APP_TIMEZONE)
+    return parsed.astimezone(APP_TIMEZONE)
+
 def checkin_fill(dept_key,check_in):
     ci=to_min(check_in)
     if ci is None: return "EEEEEE","999999"
@@ -550,31 +665,100 @@ def calc_hours(ci,co):
     if m==0 and co=="-": return "-"
     h,mm=divmod(m,60); return f"{h} hrs {mm:02d} min"
 
-def parse_by_day(events):
-    emp_days,emp_names=defaultdict(lambda: defaultdict(list)),{}
-    for ev in events:
-        emp_id=str(ev.get("employeeNoString") or ev.get("employeeNo") or ev.get("cardNo") or "").strip()
-        name=str(ev.get("name") or "").strip()
-        if not emp_id and not name: continue
-        if not emp_id: emp_id=name
-        emp_names[emp_id]=name or f"ID {emp_id}"
-        t=str(ev.get("time") or "")
-        if len(t)>=16: emp_days[emp_id][t[:10]].append(t[11:16])
+def parse_by_day(events, report_start=None, report_end=None):
+    """
+    Build attendance rows from chronological scans.
 
-    rows=[]
-    now_value=local_now()
-    for emp_id,days in emp_days.items():
-        for day_str,times in sorted(days.items()):
-            times=sorted(times)
-            ci=times[0]
-            raw_co=times[-1] if len(times)>1 else "-"
-            # During today's morning hours, every scan is treated as a check-in.
-            # Checkout and worked hours become visible from 14:00 onward.
-            co="-" if hide_current_day_checkout(day_str, now_value) else raw_co
-            rows.append({"name":emp_names[emp_id],"employee_id":emp_id,
-                         "date":day_str,"check_in":ci,"check_out":co,
-                         "hours":calc_hours(ci,co),"mins":calc_mins(ci,co)})
-    return sorted(rows,key=lambda r:(r["date"],r["name"]))
+    A scan becomes checkout only when it occurs at the allocated shift end or
+    later. Duplicate scans and scans made before shift end are ignored, leaving
+    checkout and worked hours blank when no valid checkout exists.
+    """
+    employee_scans = defaultdict(list)
+    employee_names = {}
+
+    for event in events:
+        employee_id = str(
+            event.get("employeeNoString")
+            or event.get("employeeNo")
+            or event.get("cardNo")
+            or ""
+        ).strip()
+        name = str(event.get("name") or "").strip()
+        if not employee_id and not name:
+            continue
+        if not employee_id:
+            employee_id = name
+
+        scan_time = parse_event_datetime(event.get("time"))
+        if scan_time is None:
+            continue
+
+        employee_names[employee_id] = name or f"ID {employee_id}"
+        employee_scans[employee_id].append(scan_time)
+
+    rows = []
+    grace = timedelta(hours=CHECKOUT_GRACE_HOURS)
+
+    for employee_id, scans in employee_scans.items():
+        scans = sorted(set(scans))
+        employee_name = employee_names[employee_id]
+        department_key = get_dept(employee_name)
+        index = 0
+
+        while index < len(scans):
+            check_in_dt = scans[index]
+            _, allocated_end = get_shift_window(department_key, check_in_dt)
+
+            checkout_dt = None
+            checkout_index = None
+            next_index = index + 1
+            candidate_index = index + 1
+
+            while candidate_index < len(scans):
+                candidate = scans[candidate_index]
+
+                if candidate < allocated_end:
+                    next_index = candidate_index + 1
+                    candidate_index += 1
+                    continue
+
+                if candidate <= allocated_end + grace:
+                    checkout_dt = candidate
+                    checkout_index = candidate_index
+                break
+
+            report_day = check_in_dt.date()
+            within_start = report_start is None or report_day >= report_start
+            within_end = report_end is None or report_day <= report_end
+
+            if within_start and within_end:
+                check_in = check_in_dt.strftime("%H:%M")
+                check_out = checkout_dt.strftime("%H:%M") if checkout_dt else "-"
+                rows.append({
+                    "name": employee_name,
+                    "employee_id": employee_id,
+                    "date": report_day.isoformat(),
+                    "check_in": check_in,
+                    "check_out": check_out,
+                    "hours": calc_hours(check_in, check_out),
+                    "mins": calc_mins(check_in, check_out),
+                })
+
+            index = checkout_index + 1 if checkout_index is not None else max(next_index, index + 1)
+
+    consolidated = {}
+    for row in sorted(rows, key=lambda item: (item["date"], item["name"], item["check_in"])):
+        key = (row["employee_id"], row["date"])
+        if key not in consolidated:
+            consolidated[key] = row
+            continue
+        existing = consolidated[key]
+        if existing["check_out"] == "-" and row["check_out"] != "-":
+            existing["check_out"] = row["check_out"]
+            existing["hours"] = calc_hours(existing["check_in"], existing["check_out"])
+            existing["mins"] = calc_mins(existing["check_in"], existing["check_out"])
+
+    return sorted(consolidated.values(), key=lambda row: (row["date"], row["name"]))
 
 def build_dept_data(day_rows):
     result={}
@@ -662,8 +846,10 @@ def fetch_events(device_ip,username,password,start_date,end_date,progress_cb=Non
     while True:
         payload={"AcsEventCond":{"searchID":"1","searchResultPosition":position,
             "maxResults":30,"major":0,"minor":0,
-            "startTime":f"{start_date}T00:00:00+03:00",
-            "endTime":f"{end_date}T23:59:59+03:00"}}
+            # Include the previous and following day so overnight and 24-hour
+            # shifts can be paired without creating false morning check-ins.
+            "startTime":f"{start_date - timedelta(days=1)}T00:00:00+03:00",
+            "endTime":f"{end_date + timedelta(days=1)}T23:59:59+03:00"}}
         try: r=requests.post(url,auth=auth,json=payload,timeout=15,verify=False)
         except requests.exceptions.RequestException as e: return None,str(e)
         if r.status_code!=200: return None,f"HTTP {r.status_code}: {r.text[:200]}"
@@ -1108,282 +1294,287 @@ def build_xlsx_summary(summary,total_days,start_date,end_date,label,site="Buguru
 # ── STREAMLIT UI ─────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════
 
-# ── Persist selected site across reruns ───────────────────────
 site_names = list(SITES.keys())
 if "selected_site" not in st.session_state:
     st.session_state.selected_site = site_names[0]
-if "show_settings" not in st.session_state:
-    st.session_state.show_settings = False
 
-# ── Resolve site config ───────────────────────────────────────
-site_cfg      = SITES[st.session_state.selected_site]
+# ── Site selection — one responsive selector ─────────────────
+selector_left, selector_right = st.columns([1.1, 2.9])
+with selector_left:
+    selected_site = st.selectbox(
+        "Select site",
+        site_names,
+        index=site_names.index(st.session_state.selected_site),
+        key="main_site_selector",
+    )
+
+if selected_site != st.session_state.selected_site:
+    st.session_state.selected_site = selected_site
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
+site_cfg = SITES[st.session_state.selected_site]
 ALL_EMPLOYEES = site_cfg["employees"]
-# Puma Upanga must never display the retired Manager department in the UI or reports.
-DEPT_ORDER    = [dk for dk in site_cfg["dept_order"]
-                 if not (st.session_state.selected_site == "Puma Upanga" and dk == "Manager")]
-DEPT_COLORS   = site_cfg["dept_colors"]
-device_ip     = site_cfg["device_ip"]
-username      = site_cfg["username"]
-password      = site_cfg["password"]
+DEPT_ORDER = [
+    department
+    for department in site_cfg["dept_order"]
+    if not (
+        st.session_state.selected_site == "Puma Upanga"
+        and department == "Manager"
+    )
+]
+DEPT_COLORS = site_cfg["dept_colors"]
 
-# ── Sidebar — hidden until ⚙ Settings pressed ─────────────────
+st.markdown(
+    f"""
+    <div class="hero">
+      <div class="hero-title">{site_cfg['label']} Shift Reports</div>
+      <div class="hero-subtitle">View attendance, validate shift checkouts and download daily or period reports.</div>
+      <div class="site-badge">Attendance & shift reporting</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── Device settings remain available without cluttering the page ────────────
 with st.sidebar:
-    if st.session_state.show_settings:
-        st.markdown("## ⚙ Settings")
-        st.markdown("---")
-        sb_site = st.selectbox("Site", site_names,
-                               index=site_names.index(st.session_state.selected_site),
-                               key="sb_site_select")
-        if sb_site != st.session_state.selected_site:
-            st.session_state.selected_site = sb_site
-            try: st.rerun()
-            except AttributeError: st.experimental_rerun()
+    st.markdown("## Report Settings")
+    st.caption(f"Active site: {site_cfg['label']}")
+    device_ip = st.text_input(
+        "Device IP:Port",
+        value=site_cfg["device_ip"],
+        key=f"cfg_ip_{st.session_state.selected_site}",
+    )
+    username = st.text_input(
+        "Username",
+        value=site_cfg["username"],
+        key=f"cfg_user_{st.session_state.selected_site}",
+    )
+    password = st.text_input(
+        "Password",
+        value=site_cfg["password"],
+        type="password",
+        key=f"cfg_pass_{st.session_state.selected_site}",
+    )
 
-        site_cfg      = SITES[st.session_state.selected_site]
-        ALL_EMPLOYEES = site_cfg["employees"]
-        DEPT_ORDER    = [dk for dk in site_cfg["dept_order"]
-                         if not (st.session_state.selected_site == "Puma Upanga" and dk == "Manager")]
-        DEPT_COLORS   = site_cfg["dept_colors"]
+    with st.expander("Shift rules", expanded=False):
+        for department_key in DEPT_ORDER:
+            department = ALL_EMPLOYEES.get(department_key, {})
+            if department:
+                st.markdown(f"**{department['label']}**")
+                st.caption(department["shift"])
 
-        st.markdown("---")
-        device_ip = st.text_input("Device IP:Port", value=site_cfg["device_ip"], key="cfg_ip")
-        username  = st.text_input("Username",        value=site_cfg["username"],   key="cfg_user")
-        password  = st.text_input("Password",        value=site_cfg["password"],   type="password", key="cfg_pass")
-        st.markdown("---")
-        st.markdown("**Shift Rules**")
-        shift_lines = ""
-        for dk in DEPT_ORDER:
-            d = ALL_EMPLOYEES.get(dk, {})
-            if d:
-                shift_lines += f"<b>{d['label']}</b><br>{d['shift']}<br><br>"
-        st.markdown(f"<div style='font-size:12px'>{shift_lines}</div>", unsafe_allow_html=True)
-        if st.button("✕ Close Settings"):
-            st.session_state.show_settings = False
-            try: st.rerun()
-            except AttributeError: st.experimental_rerun()
-
-# Header + buttons — single flat row
-top_l, top_r1, top_r2 = st.columns([7,1,1])
-with top_r1:
-    if st.button("⚙ Settings", key="toggle_settings"):
-        st.session_state.show_settings = not st.session_state.show_settings
-        try: st.rerun()
-        except AttributeError: st.experimental_rerun()
-with top_r2:
-    if st.button("Light" if dark else "Dark"):
-        st.session_state.dark_mode = not st.session_state.dark_mode
-        try: st.rerun()
-        except AttributeError: st.experimental_rerun()
-
-with top_l:
-    st.markdown(f"# {site_cfg['label']} Shift Reports")
-
-st.markdown(f"<p style='color:{MUTED};margin-top:-10px'>Daily attendance reports — <b>{site_cfg['label']}</b> access control device.</p>",
-            unsafe_allow_html=True)
-
-st.markdown("---")
-
-# ── Site selector cards (always visible) ──────────────────────
-site_cols = st.columns(len(site_names))
-for col, sname in zip(site_cols, site_names):
-    is_active = (sname == st.session_state.selected_site)
-    scfg = SITES[sname]
-    card_bg  = "#8B0000" if is_active else "#f9f4ef"
-    card_txt = "#FFF3CD" if is_active else "#555555"
-    card_bdr = "#D4A017" if is_active else "#dddddd"
-    col.markdown(
-        f"<div style='background:{card_bg};border:2px solid {card_bdr};"
-        f"border-radius:10px;padding:12px 8px;text-align:center;margin-bottom:4px'>"
-        f"<div style='font-size:14px;font-weight:bold;color:{card_txt}'>{sname}</div>"
-        f"<div style='font-size:10px;color:{card_txt};opacity:0.75;margin-top:3px'>"
-        f"{scfg['device_ip']}</div>"
-        f"</div>", unsafe_allow_html=True)
-    if not is_active:
-        if col.button(f"Switch", key=f"site_btn_{sname}"):
-            st.session_state.selected_site = sname
-            try: st.rerun()
-            except AttributeError: st.experimental_rerun()
-    else:
-        col.markdown(f"<div style='text-align:center;color:#8B0000;font-size:12px;font-weight:bold'>✓ Active</div>",
-                     unsafe_allow_html=True)
-
-st.markdown("---")
-
-# ── Date range + quick presets ────────────────────────────────
-st.markdown("### Date Range")
-preset_col, _, dc1, dc2 = st.columns([3,0.3,2,2])
+# ── Date range ────────────────────────────────────────────────
+st.markdown('<div class="section-title">Date range</div>', unsafe_allow_html=True)
+preset_col, from_col, to_col = st.columns([1.25, 1, 1])
 with preset_col:
-    preset = st.selectbox("Quick select", ["Custom","Today","Yesterday","This week","Last week","This month","Last month"], index=1)
+    preset = st.selectbox(
+        "Quick select",
+        ["Custom", "Today", "Yesterday", "This week", "Last week", "This month", "Last month"],
+        index=1,
+    )
 
-today = date.today()
-if preset=="Today":
-    default_start=default_end=today
-elif preset=="Yesterday":
-    default_start=default_end=today-timedelta(days=1)
-elif preset=="This week":
-    default_start=today-timedelta(days=today.weekday()); default_end=today
-elif preset=="Last week":
-    default_start=today-timedelta(days=today.weekday()+7)
-    default_end=today-timedelta(days=today.weekday()+1)
-elif preset=="This month":
-    default_start=today.replace(day=1); default_end=today
-elif preset=="Last month":
-    first_this=today.replace(day=1)
-    default_end=first_this-timedelta(days=1)
-    default_start=default_end.replace(day=1)
+today = local_now().date()
+if preset == "Today":
+    default_start = default_end = today
+elif preset == "Yesterday":
+    default_start = default_end = today - timedelta(days=1)
+elif preset == "This week":
+    default_start = today - timedelta(days=today.weekday())
+    default_end = today
+elif preset == "Last week":
+    default_start = today - timedelta(days=today.weekday() + 7)
+    default_end = today - timedelta(days=today.weekday() + 1)
+elif preset == "This month":
+    default_start = today.replace(day=1)
+    default_end = today
+elif preset == "Last month":
+    first_this_month = today.replace(day=1)
+    default_end = first_this_month - timedelta(days=1)
+    default_start = default_end.replace(day=1)
 else:
-    default_start=default_end=today
+    default_start = default_end = today
 
-with dc1:
+with from_col:
     start_date = st.date_input("From", value=default_start, max_value=today)
-with dc2:
+with to_col:
     end_date = st.date_input("To", value=default_end, max_value=today)
 
 if end_date < start_date:
-    st.warning("End date is before start date — swapping."); start_date,end_date=end_date,start_date
+    start_date, end_date = end_date, start_date
+    st.warning("The dates were reversed automatically so the earlier date comes first.")
 
-num_days=(end_date-start_date).days+1
-is_multi=num_days>1
-tag=str(start_date) if not is_multi else f"{start_date}_to_{end_date}"
+num_days = (end_date - start_date).days + 1
+is_multi = num_days > 1
+tag = str(start_date) if not is_multi else f"{start_date}_to_{end_date}"
 
-# auto-detect label
-if num_days>=28:   period_label="Monthly"
-elif num_days>=7:  period_label="Weekly"
-else:              period_label="Daily"
+if num_days >= 28:
+    period_label = "Monthly"
+elif num_days >= 7:
+    period_label = "Weekly"
+else:
+    period_label = "Daily"
 
-st.markdown(f"<small style='color:{MUTED}'>{num_days} day(s) selected — <b>{period_label}</b> report</small>",
-            unsafe_allow_html=True)
-st.markdown("---")
+st.caption(f"{num_days} day(s) selected · {period_label} report")
 
 # ── Generate ──────────────────────────────────────────────────
-if st.button("View / Generate Reports"):
-    progress=st.progress(0.0); status=st.empty()
+if st.button("View and Generate Reports", type="primary", use_container_width=True):
+    progress = st.progress(0.0)
+    status = st.empty()
 
-    def upd(val,msg): progress.progress(val); status.info(msg)
+    def upd(value, message):
+        progress.progress(value)
+        status.info(message)
 
-    status.info("Connecting to device...")
-    events,err=fetch_events(device_ip,username,password,start_date,end_date,upd)
-    if err: st.error(f"Failed to fetch data: {err}"); st.stop()
+    status.info("Connecting to the attendance device...")
+    events, error = fetch_events(
+        device_ip,
+        username,
+        password,
+        start_date,
+        end_date,
+        upd,
+    )
+    if error:
+        st.error(f"Failed to fetch data: {error}")
+        st.stop()
 
-    progress.progress(0.6); status.info("Processing records...")
-    rows=parse_by_day(events)
-    rows_by_date=defaultdict(list)
-    for r in rows: rows_by_date[r["date"]].append(r)
+    progress.progress(0.6)
+    status.info("Validating attendance scans against allocated shifts...")
+    rows = parse_by_day(events, start_date, end_date)
+    rows_by_date = defaultdict(list)
+    for row in rows:
+        rows_by_date[row["date"]].append(row)
 
     # ── Summary cards ─────────────────────────────────────────
     progress.progress(0.65)
-    total_present=len(rows)
-    all_members=sum(len(ALL_EMPLOYEES[dk]["members"]) for dk in DEPT_ORDER)
-    st.markdown("### Summary")
-    m1,m2,m3,m4,m5=st.columns(5)
-    m1.metric("Days", num_days)
-    m2.metric("Total Records", total_present)
-    m3.metric("Staff Roster", all_members)
-    m4.metric("Avg / Day", total_present//max(num_days,1))
-    unique_staff=len(set(r["name"] for r in rows))
-    m5.metric("Unique Staff", unique_staff)
+    total_present = len(rows)
+    all_members = sum(len(ALL_EMPLOYEES[key]["members"]) for key in DEPT_ORDER)
+    unique_staff = len({row["name"] for row in rows})
 
-    # ── Per-dept breakdown (last day or whole range) ───────────
-    last_rows=rows_by_date.get(end_date.strftime("%Y-%m-%d"),[])
-    dept_data_last=build_dept_data(last_rows)
-    st.markdown(f"**Department breakdown — {end_date.strftime('%d %B %Y')}**")
-    cols=st.columns(len(DEPT_ORDER))
-    for col,dk in zip(cols,DEPT_ORDER):
-        pd_=dept_data_last[dk]
-        col.markdown(
-            f"<div style='background:{DEPT_COLORS[dk]};padding:10px 6px;"
-            f"border-radius:6px;text-align:center;margin-bottom:4px'>"
-            f"<div style='color:#FFF3CD;font-weight:bold;font-size:11px'>{ALL_EMPLOYEES[dk]['label']}</div>"
-            f"<div style='color:#FFF3CD;font-size:22px;font-weight:bold'>{len(pd_['present'])}</div>"
-            f"<div style='color:#ccc;font-size:10px'>of {len(pd_['present'])+len(pd_['absent'])}</div>"
-            f"</div>",unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Attendance overview</div>', unsafe_allow_html=True)
+    metric_columns = st.columns(5)
+    metric_columns[0].metric("Days", num_days)
+    metric_columns[1].metric("Records", total_present)
+    metric_columns[2].metric("Staff roster", all_members)
+    metric_columns[3].metric("Average / day", total_present // max(num_days, 1))
+    metric_columns[4].metric("Unique staff", unique_staff)
+
+    # ── Responsive department breakdown ──────────────────────
+    last_rows = rows_by_date.get(end_date.strftime("%Y-%m-%d"), [])
+    department_data_last = build_dept_data(last_rows)
+    st.markdown(
+        f'<div class="section-title">Department breakdown · {end_date.strftime("%d %B %Y")}</div>',
+        unsafe_allow_html=True,
+    )
+    department_cards = ['<div class="dept-grid">']
+    for department_key in DEPT_ORDER:
+        attendance = department_data_last[department_key]
+        present_count = len(attendance["present"])
+        total_count = present_count + len(attendance["absent"])
+        department_cards.append(
+            f'''<div class="dept-card" style="--dept:{DEPT_COLORS[department_key]}">
+                  <div class="dept-name">{ALL_EMPLOYEES[department_key]['label']}</div>
+                  <div class="dept-count">{present_count}</div>
+                  <div class="dept-total">present of {total_count}</div>
+                </div>'''
+        )
+    department_cards.append("</div>")
+    st.markdown("".join(department_cards), unsafe_allow_html=True)
 
     # ── Build files ───────────────────────────────────────────
-    summary,total_days_n=build_summary(rows_by_date,start_date,end_date)
-
-    progress.progress(0.70); status.info("Building daily Word document...")
-    site_label = site_cfg["label"].replace(" ","_")
+    summary, total_days_n = build_summary(rows_by_date, start_date, end_date)
+    site_label = site_cfg["label"].replace(" ", "_")
     site_display = site_cfg["label"]
-    docx_daily  = build_docx_daily(rows_by_date,start_date,end_date,site_display)
 
-    progress.progress(0.78); status.info("Building daily PDF...")
-    pdf_daily   = build_pdf_daily(rows_by_date,start_date,end_date,site_display)
+    progress.progress(0.70)
+    status.info("Building Word reports...")
+    docx_daily = build_docx_daily(rows_by_date, start_date, end_date, site_display)
+    docx_summary = build_docx_summary(
+        summary, total_days_n, start_date, end_date, period_label, site_display
+    )
 
-    progress.progress(0.84); status.info("Building daily Excel...")
-    xlsx_daily  = build_xlsx_daily(rows_by_date,start_date,end_date,site_display)
+    progress.progress(0.80)
+    status.info("Building PDF reports...")
+    pdf_daily = build_pdf_daily(rows_by_date, start_date, end_date, site_display)
+    pdf_summary = build_pdf_summary(
+        summary, total_days_n, start_date, end_date, period_label, site_display
+    )
 
-    progress.progress(0.88); status.info(f"Building {period_label} summary...")
-    docx_summ   = build_docx_summary(summary,total_days_n,start_date,end_date,period_label,site_display)
-    pdf_summ    = build_pdf_summary(summary,total_days_n,start_date,end_date,period_label,site_display)
-    xlsx_summ   = build_xlsx_summary(summary,total_days_n,start_date,end_date,period_label,site_display)
+    progress.progress(0.90)
+    status.info("Building Excel reports...")
+    xlsx_daily = build_xlsx_daily(rows_by_date, start_date, end_date, site_display)
+    xlsx_summary = build_xlsx_summary(
+        summary, total_days_n, start_date, end_date, period_label, site_display
+    )
 
-    progress.progress(1.0); status.success("Reports ready!")
+    progress.progress(1.0)
+    status.empty()
+    progress.empty()
+    st.success("Reports are ready.")
 
     # ── Viewer and downloads ──────────────────────────────────
-    st.markdown("### Report Options")
-    viewer_tab, downloads_tab = st.tabs(["Viewer", "Downloads"])
+    st.info(
+        "Checkout is shown only when a second scan is recorded at the allocated "
+        "shift end or later. Duplicate and early scans remain blank."
+    )
+
+    viewer_tab, downloads_tab = st.tabs(["Attendance viewer", "Downloads"])
 
     with viewer_tab:
-        current_local = local_now()
-        if start_date == end_date == current_local.date():
-            if current_local.hour < MORNING_CHECKOUT_CUTOFF_HOUR:
-                st.info(
-                    "Morning view: check-in times are shown. Checkout and hours worked "
-                    "remain blank until 2:00 PM Tanzania time."
-                )
-            else:
-                st.caption(
-                    "Afternoon/evening view: recorded check-in and checkout times are shown."
-                )
-
         st.markdown(
             """
-            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:4px 0 14px 0;">
-              <span style="font-weight:700;">Check-in key:</span>
-              <span style="background:#C6EFCE;color:#276221;padding:4px 10px;border:1px solid #9BCB9F;border-radius:4px;">Early</span>
-              <span style="background:#FFFFFF;color:#333333;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">On time</span>
-              <span style="background:#FFCCCC;color:#CC0000;padding:4px 10px;border:1px solid #E6A0A0;border-radius:4px;">Late</span>
-              <span style="background:#EEEEEE;color:#777777;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">Absent</span>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:3px 0 14px 0;">
+              <span style="font-weight:750;">Check-in key:</span>
+              <span style="background:#C6EFCE;color:#276221;padding:4px 9px;border:1px solid #A9CFAA;border-radius:999px;font-size:12px;">Early</span>
+              <span style="background:#FFFFFF;color:#333333;padding:4px 9px;border:1px solid #D6D6D6;border-radius:999px;font-size:12px;">On time</span>
+              <span style="background:#FFCCCC;color:#CC0000;padding:4px 9px;border:1px solid #E4A7A7;border-radius:999px;font-size:12px;">Late</span>
+              <span style="background:#EEEEEE;color:#777777;padding:4px 9px;border:1px solid #D0D0D0;border-radius:999px;font-size:12px;">Absent</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
         daily_view_tab, summary_view_tab = st.tabs([
-            f"Daily Attendance ({num_days} day{'s' if num_days > 1 else ''})",
-            f"{period_label} Summary",
+            f"Daily attendance ({num_days} day{'s' if num_days > 1 else ''})",
+            f"{period_label} summary",
         ])
 
         with daily_view_tab:
             view_day = start_date
             while view_day <= end_date:
                 day_key = view_day.strftime("%Y-%m-%d")
-                st.markdown(f"#### {view_day.strftime('%A, %d %B %Y')}")
+                st.markdown(f"### {view_day.strftime('%A, %d %B %Y')}")
                 day_data = build_dept_data(rows_by_date.get(day_key, []))
 
-                for dk in DEPT_ORDER:
-                    department = ALL_EMPLOYEES[dk]
-                    attendance = day_data[dk]
+                for department_key in DEPT_ORDER:
+                    department = ALL_EMPLOYEES[department_key]
+                    attendance = day_data[department_key]
                     st.markdown(
-                        f"**{department['label']}** — {department['shift']} "
-                        f"({len(attendance['present'])} present, {len(attendance['absent'])} absent)"
+                        f'''<div class="dept-heading" style="--dept:{DEPT_COLORS[department_key]}">
+                              <strong>{department['label']}</strong><br>
+                              <span>{department['shift']} · {len(attendance['present'])} present · {len(attendance['absent'])} absent</span>
+                            </div>''',
+                        unsafe_allow_html=True,
                     )
 
                     viewer_rows = []
-                    for rec in attendance["present"]:
+                    for record in attendance["present"]:
                         viewer_rows.append({
                             "Status": "Present",
-                            "Employee Name": rec["name"],
-                            "ID": rec["employee_id"],
-                            "Check In": rec["check_in"],
-                            "Check Out": "" if rec["check_out"] == "-" else rec["check_out"],
-                            "Hours Worked": "" if rec["hours"] == "-" else rec["hours"],
+                            "Employee Name": record["name"],
+                            "ID": record["employee_id"],
+                            "Check In": record["check_in"],
+                            "Check Out": "" if record["check_out"] == "-" else record["check_out"],
+                            "Hours Worked": "" if record["hours"] == "-" else record["hours"],
                         })
                     for absent_name in attendance["absent"]:
                         viewer_rows.append({
                             "Status": "Absent",
                             "Employee Name": absent_name,
-                            "ID": get_configured_employee_id(dk, absent_name),
+                            "ID": get_configured_employee_id(department_key, absent_name),
                             "Check In": "",
                             "Check Out": "",
                             "Hours Worked": "",
@@ -1395,71 +1586,110 @@ if st.button("View / Generate Reports"):
                             "Check In", "Check Out", "Hours Worked",
                         ]
                         viewer_df = pd.DataFrame(viewer_rows, columns=viewer_columns)
-                        styled_viewer = style_viewer_dataframe(viewer_df, dk)
+                        styled_viewer = style_viewer_dataframe(viewer_df, department_key)
+                        dataframe_height = min(520, max(180, 36 * (len(viewer_df) + 1)))
                         st.dataframe(
                             styled_viewer,
                             hide_index=True,
                             use_container_width=True,
                             column_order=viewer_columns,
+                            height=dataframe_height,
                         )
                 view_day += timedelta(days=1)
 
         with summary_view_tab:
             st.caption(
-                "One row per employee showing attendance totals and average times "
-                "for the selected period."
+                "One row per employee with attendance totals, average times and total hours."
             )
-            for dk in DEPT_ORDER:
-                department = ALL_EMPLOYEES[dk]
-                st.markdown(f"**{department['label']}** — {department['shift']}")
+            for department_key in DEPT_ORDER:
+                department = ALL_EMPLOYEES[department_key]
+                st.markdown(
+                    f'''<div class="dept-heading" style="--dept:{DEPT_COLORS[department_key]}">
+                          <strong>{department['label']}</strong><br>
+                          <span>{department['shift']}</span>
+                        </div>''',
+                    unsafe_allow_html=True,
+                )
                 summary_rows = []
-                for rec in summary[dk]:
+                for record in summary[department_key]:
                     summary_rows.append({
-                        "Employee Name": rec["name"],
-                        "ID": rec["id"],
-                        "Days Present": rec["days_present"],
-                        "Days Absent": rec["days_absent"],
-                        "Average Check In": "" if rec["avg_in"] == "-" else rec["avg_in"],
-                        "Average Check Out": "" if rec["avg_out"] == "-" else rec["avg_out"],
-                        "Total Hours": "" if rec["total_hrs"] == "-" else rec["total_hrs"],
+                        "Employee Name": record["name"],
+                        "ID": record["id"],
+                        "Days Present": record["days_present"],
+                        "Days Absent": record["days_absent"],
+                        "Average Check In": "" if record["avg_in"] == "-" else record["avg_in"],
+                        "Average Check Out": "" if record["avg_out"] == "-" else record["avg_out"],
+                        "Total Hours": "" if record["total_hrs"] == "-" else record["total_hrs"],
                     })
-                st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+                st.dataframe(
+                    summary_rows,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(520, max(180, 36 * (len(summary_rows) + 1))),
+                )
 
     with downloads_tab:
         daily_download_tab, summary_download_tab = st.tabs([
             f"Daily ({num_days} day{'s' if num_days > 1 else ''})",
-            f"{period_label} Summary",
+            f"{period_label} summary",
         ])
 
         with daily_download_tab:
-            d1,d2,d3=st.columns(3)
-            with d1:
-                st.download_button("Download Word (.docx)",data=docx_daily,
+            download_columns = st.columns(3)
+            with download_columns[0]:
+                st.download_button(
+                    "Download Word (.docx)",
+                    data=docx_daily,
                     file_name=f"{site_label}_Daily_{tag}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            with d2:
-                st.download_button("Download PDF",data=pdf_daily,
-                    file_name=f"{site_label}_Daily_{tag}.pdf",mime="application/pdf")
-            with d3:
-                st.download_button("Download Excel (.xlsx)",data=xlsx_daily,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+            with download_columns[1]:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_daily,
+                    file_name=f"{site_label}_Daily_{tag}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with download_columns[2]:
+                st.download_button(
+                    "Download Excel (.xlsx)",
+                    data=xlsx_daily,
                     file_name=f"{site_label}_Daily_{tag}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
         with summary_download_tab:
-            st.markdown(f"<small style='color:{MUTED}'>One row per employee — days present/absent, average check-in/out, total hours worked across the selected period.</small>",
-                        unsafe_allow_html=True)
-            d1,d2,d3=st.columns(3)
-            with d1:
-                st.download_button("Download Word (.docx)",data=docx_summ,
+            st.caption(
+                "Period summary: days present/absent, average check-in/out and total hours."
+            )
+            download_columns = st.columns(3)
+            with download_columns[0]:
+                st.download_button(
+                    "Download Word (.docx)",
+                    data=docx_summary,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            with d2:
-                st.download_button("Download PDF",data=pdf_summ,
-                    file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",mime="application/pdf")
-            with d3:
-                st.download_button("Download Excel (.xlsx)",data=xlsx_summ,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+            with download_columns[1]:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_summary,
+                    file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with download_columns[2]:
+                st.download_button(
+                    "Download Excel (.xlsx)",
+                    data=xlsx_summary,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
 st.markdown("---")
-st.markdown(f"<small style='color:{MUTED}'>{site_cfg['label']} Shift Report System</small>",unsafe_allow_html=True)
+st.caption("Multi-site shift reporting · Tanzania time (UTC+03:00)")
