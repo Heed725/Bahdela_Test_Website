@@ -620,35 +620,35 @@ def checkin_fill(dept_key,check_in):
         else:           ss = 1140 # night 19:00
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFFFFF","333333"
+        return "FFF2CC","333333"
     # Oil Supervisor: 06:00-18:00 or 18:00-06:00
     if dept_key == "Oil Supervisor":
         ss = 360 if ci < 720 else 1080
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFFFFF","333333"
+        return "FFF2CC","333333"
     # Oil Logistics: 08:00-17:00
     if dept_key == "Oil Logistics":
         ss = 480
         if ci < ss:      return "C6EFCE","276221"
         if ci > ss+60:   return "FFCCCC","CC0000"
-        return "FFFFFF","333333"
+        return "FFF2CC","333333"
     # Security/Walinzi: 24hr or two-shift
     if dept_key in ("Walinzi","Security"):
         ss = 480 if 480 <= ci < 960 else 960
         if ci < ss:     return "C6EFCE","276221"
         if ci > ss+60:  return "FFCCCC","CC0000"
-        return "FFFFFF","333333"
+        return "FFF2CC","333333"
     # Supermarket: 08:00-17:00 or 17:00-07:00
     if dept_key == "Supermarket":
         ss = 480 if ci < 1020 else 1020
         if ci < ss:     return "C6EFCE","276221"
         if ci > ss+60:  return "FFCCCC","CC0000"
-        return "FFFFFF","333333"
+        return "FFF2CC","333333"
     # Default day-shift depts (Shop, Manufactural, Store, Cleaner, Wakala, Manager, Accountant)
     if ci < 495: return "C6EFCE","276221"
     if ci > 540: return "FFCCCC","CC0000"
-    return "FFFFFF","333333"
+    return "FFF2CC","333333"
 
 def style_viewer_dataframe(dataframe, dept_key):
     """Apply the report's attendance colours to the on-screen viewer."""
@@ -1015,7 +1015,7 @@ def build_docx_daily(rows_by_date,start_date,end_date,site="Buguruni"):
                 _wc(row.cells[i],l,bold=True,size=9.5,color="FFF3CD",align=a,bg="C0392B",border="8B0000")
             for idx,rec in enumerate(pd["present"]):
                 rw=tbl.add_row(); _rh(rw,0.6)
-                fill="FFFFF0" if idx%2==0 else "FFF3CD"
+                fill="FFFFFF"
                 ci_bg,ci_tc=checkin_fill(dk,rec["check_in"])
                 _wc(rw.cells[0],idx+1,align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
                 _wc(rw.cells[1],rec["name"],bg=fill)
@@ -1062,7 +1062,7 @@ def build_docx_summary(summary,total_days,start_date,end_date,label,site="Buguru
             _wc(hrow.cells[i],l,bold=True,size=9,color="FFF3CD",align=a,bg="C0392B",border="8B0000")
         for idx,rec in enumerate(rows):
             rw=tbl.add_row(); _rh(rw,0.6)
-            fill="FFFFF0" if idx%2==0 else "FFF3CD"
+            fill="FFFFFF"
             ab_col="CC0000" if rec["days_absent"]>0 else "2D2D2D"
             if rec["days_present"]==0: fill="EEEEEE"
             _wc(rw.cells[0],idx+1,align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
@@ -1117,7 +1117,7 @@ def _pdf_logo():
 def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
     buf=io.BytesIO(); doc,W=_pdf_doc(buf); story=[]
     CR=hex2rl("8B0000"); CRM=hex2rl("C0392B"); CYL=hex2rl("B8860B")
-    CYLL=hex2rl("FFF3CD"); CCR=hex2rl("FFFFF0"); CGB=hex2rl("EEEEEE")
+    CYLL=hex2rl("FFF3CD"); CCR=hex2rl("FFFFFF"); CGB=hex2rl("EEEEEE")
     CGT=hex2rl("999999"); CMG=hex2rl("CCCCCC")
     dlabel=(start_date.strftime("%d %B %Y") if start_date==end_date
             else f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}")
@@ -1159,7 +1159,7 @@ def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
                    ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
                    ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5)]
             for idx,rec in enumerate(pd["present"]):
-                fill=CCR if idx%2==0 else CYLL
+                fill=CCR
                 ci_bg_h,ci_tc_h=checkin_fill(dk,rec["check_in"])
                 ci_bg=hex2rl(ci_bg_h); ci_tc=hex2rl(ci_tc_h)
                 data.append([RP(str(idx+1),size=8,align=TA_CENTER),RP(rec["name"],size=8),
@@ -1188,7 +1188,7 @@ def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
 def build_pdf_summary(summary,total_days,start_date,end_date,label,site="Buguruni"):
     buf=io.BytesIO(); doc,W=_pdf_doc(buf); story=[]
     CR=hex2rl("8B0000"); CRM=hex2rl("C0392B"); CYL=hex2rl("B8860B")
-    CYLL=hex2rl("FFF3CD"); CCR=hex2rl("FFFFF0"); CGB=hex2rl("EEEEEE")
+    CYLL=hex2rl("FFF3CD"); CCR=hex2rl("FFFFFF"); CGB=hex2rl("EEEEEE")
     CGT=hex2rl("999999"); CMG=hex2rl("CCCCCC")
     CGN=hex2rl("276221"); CRD=hex2rl("CC0000")
     dlabel=f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}  ({total_days} days)"
@@ -1220,7 +1220,7 @@ def build_pdf_summary(summary,total_days,start_date,end_date,label,site="Bugurun
                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
                ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5)]
         for idx,rec in enumerate(rows):
-            fill=CCR if idx%2==0 else CYLL
+            fill=CCR
             tc=CGT if rec["days_present"]==0 else colors.black
             if rec["days_present"]==0: fill=CGB
             data.append([RP(str(idx+1),size=8,color=tc,align=TA_CENTER),
@@ -1316,7 +1316,7 @@ def build_xlsx_daily(rows_by_date,start_date,end_date,site="Buguruni"):
             cur=_xl_hdr(ws,cur,HDR,AL,6)
             for idx,rec in enumerate(pd["present"]):
                 ws.row_dimensions[cur].height=16
-                fh="FFFFF0" if idx%2==0 else "FFF3CD"
+                fh="FFFFFF"
                 ci_bg,ci_tc=checkin_fill(dk,rec["check_in"])
                 co=rec["check_out"] if rec["check_out"]!="-" else ""
                 hrs=rec["hours"] if rec["hours"]!="-" else ""
@@ -1356,7 +1356,7 @@ def build_xlsx_summary(summary,total_days,start_date,end_date,label,site="Buguru
         cur=_xl_hdr(ws,cur,HDR,AL,8)
         for idx,rec in enumerate(rows):
             ws.row_dimensions[cur].height=16
-            fh="FFFFF0" if idx%2==0 else "FFF3CD"
+            fh="FFFFFF"
             if rec["days_present"]==0: fh="EEEEEE"
             gc="999999" if rec["days_present"]==0 else "2D2D2D"
             pc="276221" if rec["days_present"]>0 else "999999"
