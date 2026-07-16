@@ -24,17 +24,32 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
-                                Paragraph, Spacer, HRFlowable)
+                                Paragraph, Spacer, HRFlowable, Image as RLImage)
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.drawing.image import Image as XLImage
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Tanzania uses UTC+03:00 throughout the year.
 APP_TIMEZONE = timezone(timedelta(hours=3))
+
+# Keep BAHDELA-logo.png in the same folder as app.py. The /mnt/data fallback
+# is useful for local testing and does not affect Streamlit Cloud deployment.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_FILENAMES = ("BAHDELA-logo.png", "bahdela-logo.png", "BAHDELA_logo.png")
+
+def get_logo_path():
+    candidates = [os.path.join(APP_DIR, name) for name in LOGO_FILENAMES]
+    candidates.extend(os.path.join("/mnt/data", name) for name in LOGO_FILENAMES)
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
 
 # A later scan becomes checkout only from the allocated shift ending time.
 # The grace period prevents the next workday's check-in from being used as checkout.
@@ -945,6 +960,14 @@ def _dx_banner(doc,label,shift,bg):
 
 def _docx_title(doc,title_text,subtitle_text):
     doc.styles["Normal"].paragraph_format.space_after=Pt(0)
+    logo_path = get_logo_path()
+    if logo_path:
+        logo_paragraph = doc.add_paragraph()
+        logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        logo_paragraph.paragraph_format.space_before = Pt(0)
+        logo_paragraph.paragraph_format.space_after = Pt(3)
+        logo_run = logo_paragraph.add_run()
+        logo_run.add_picture(logo_path, width=Cm(4.2))
     doc.styles["Normal"].paragraph_format.space_before=Pt(0)
     tp=doc.add_paragraph(); tp.alignment=WD_ALIGN_PARAGRAPH.CENTER; tp.paragraph_format.space_after=Pt(4)
     r=tp.add_run(title_text); r.bold=True; r.font.name="Arial"
@@ -1079,6 +1102,18 @@ def _pdf_banner(d,W):
 def _pdf_table(data,style_cmds,cw):
     t=Table(data,colWidths=cw); t.setStyle(TableStyle(style_cmds)); return t
 
+def _pdf_logo():
+    logo_path = get_logo_path()
+    if not logo_path:
+        return None
+    logo = RLImage(logo_path)
+    target_width = 34 * mm
+    aspect_ratio = logo.imageHeight / float(logo.imageWidth or 1)
+    logo.drawWidth = target_width
+    logo.drawHeight = target_width * aspect_ratio
+    logo.hAlign = "CENTER"
+    return logo
+
 def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
     buf=io.BytesIO(); doc,W=_pdf_doc(buf); story=[]
     CR=hex2rl("8B0000"); CRM=hex2rl("C0392B"); CYL=hex2rl("B8860B")
@@ -1086,6 +1121,10 @@ def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
     CGT=hex2rl("999999"); CMG=hex2rl("CCCCCC")
     dlabel=(start_date.strftime("%d %B %Y") if start_date==end_date
             else f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}")
+    logo = _pdf_logo()
+    if logo:
+        story.append(logo)
+        story.append(Spacer(1,2))
     story.append(RP("DAILY SHIFT REPORT",bold=True,size=16,color=CR,align=TA_CENTER))
     story.append(Spacer(1,4))
     story.append(RP(f"Site: {site}   -   {dlabel}",size=10,color=CYL,align=TA_CENTER))
@@ -1153,6 +1192,10 @@ def build_pdf_summary(summary,total_days,start_date,end_date,label,site="Bugurun
     CGT=hex2rl("999999"); CMG=hex2rl("CCCCCC")
     CGN=hex2rl("276221"); CRD=hex2rl("CC0000")
     dlabel=f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}  ({total_days} days)"
+    logo = _pdf_logo()
+    if logo:
+        story.append(logo)
+        story.append(Spacer(1,2))
     story.append(RP(f"{label.upper()} SUMMARY REPORT",bold=True,size=16,color=CR,align=TA_CENTER))
     story.append(Spacer(1,4))
     story.append(RP(f"Site: {site}   -   {dlabel}",size=10,color=CYL,align=TA_CENTER))
@@ -1210,10 +1253,26 @@ def xfill(h): return PatternFill("solid",fgColor=h)
 def xal(h="center",v="center"): return Alignment(horizontal=h,vertical=v,wrap_text=False)
 
 def _xl_title(ws,title,subtitle,ncols):
-    ws.row_dimensions[1].height=26; ws.row_dimensions[2].height=16
-    ws.merge_cells(f"A1:{chr(64+ncols)}1"); ws.merge_cells(f"A2:{chr(64+ncols)}2")
-    c=ws.cell(1,1,title); c.font=Font(name="Arial",bold=True,size=16,color="8B0000"); c.alignment=xal()
-    c=ws.cell(2,1,subtitle); c.font=Font(name="Arial",size=11,color="B8860B"); c.alignment=xal()
+    end_col = chr(64+ncols)
+    ws.row_dimensions[1].height = 78
+    ws.merge_cells(f"A1:{end_col}1")
+
+    logo_path = get_logo_path()
+    if logo_path:
+        logo = XLImage(logo_path)
+        original_width = float(logo.width or 1)
+        original_height = float(logo.height or 1)
+        logo.width = 150
+        logo.height = int(150 * original_height / original_width)
+        logo.anchor = "C1" if ncols <= 6 else "D1"
+        ws.add_image(logo)
+
+    ws.row_dimensions[2].height=26
+    ws.row_dimensions[3].height=16
+    ws.merge_cells(f"A2:{end_col}2")
+    ws.merge_cells(f"A3:{end_col}3")
+    c=ws.cell(2,1,title); c.font=Font(name="Arial",bold=True,size=16,color="8B0000"); c.alignment=xal()
+    c=ws.cell(3,1,subtitle); c.font=Font(name="Arial",size=11,color="B8860B"); c.alignment=xal()
 
 def _xl_banner(ws,cur,label,shift,bg_hex,ncols):
     ws.row_dimensions[cur].height=6; cur+=1
@@ -1237,10 +1296,10 @@ def build_xlsx_daily(rows_by_date,start_date,end_date,site="Buguruni"):
     dlabel=(start_date.strftime("%d %B %Y") if start_date==end_date
             else f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}")
     _xl_title(ws,"DAILY SHIFT REPORT",f"Site: {site}   -   {dlabel}",6)
-    ws.row_dimensions[3].height=13; ws.merge_cells("A3:F3")
-    c=ws.cell(3,1,"Check-In Key:   Early (green)   On Time (white)   Late (red)   Absent (grey)")
+    ws.row_dimensions[4].height=13; ws.merge_cells("A4:F4")
+    c=ws.cell(4,1,"Check-In Key:   Early (green)   On Time (white)   Late (red)   Absent (grey)")
     c.font=Font(name="Arial",size=8,color="555555"); c.alignment=xal("left")
-    cur=4; total=0; day=start_date
+    cur=5; total=0; day=start_date
     HDR=["#","Employee Name","ID","Check In","Check Out","Hours Worked"]
     AL=["center","left","center","center","center","center"]
     while day<=end_date:
@@ -1287,7 +1346,7 @@ def build_xlsx_summary(summary,total_days,start_date,end_date,label,site="Buguru
     wb=Workbook(); ws=wb.active; ws.title=f"{label} Summary"
     dlabel=f"{start_date.strftime('%d %b')} - {end_date.strftime('%d %b %Y')}  ({total_days} days)"
     _xl_title(ws,f"{label.upper()} SUMMARY REPORT",f"Site: {site}   -   {dlabel}",8)
-    cur=4
+    cur=5
     HDR=["#","Employee Name","ID","Days Present","Days Absent","Avg Check-In","Avg Check-Out","Total Hours"]
     AL=["center","left","center","center","center","center","center","center"]
     for dk in DEPT_ORDER:
@@ -1325,8 +1384,6 @@ def build_xlsx_summary(summary,total_days,start_date,end_date,label,site="Buguru
 site_names = list(SITES.keys())
 if "selected_site" not in st.session_state:
     st.session_state.selected_site = site_names[0]
-if "show_settings" not in st.session_state:
-    st.session_state.show_settings = False
 
 # Resolve the currently active site before drawing the header.
 site_cfg = SITES[st.session_state.selected_site]
@@ -1344,17 +1401,8 @@ device_ip = site_cfg["device_ip"]
 username = site_cfg["username"]
 password = site_cfg["password"]
 
-# Header — same simple original structure, with settings only.
-header_left, header_right = st.columns([8, 1.4])
-with header_left:
-    st.markdown(f"# {site_cfg['label']} Shift Reports")
-with header_right:
-    if st.button("⚙ Settings", key="toggle_settings"):
-        st.session_state.show_settings = not st.session_state.show_settings
-        try:
-            st.rerun()
-        except AttributeError:
-            st.experimental_rerun()
+# Header — original simple structure with no Settings button.
+st.markdown(f"# {site_cfg['label']} Shift Reports")
 
 st.markdown(
     f"<p style='color:{MUTED};margin-top:-10px'>Daily attendance reports — "
@@ -1380,49 +1428,6 @@ if selected_site != st.session_state.selected_site:
         st.experimental_rerun()
 
 st.caption(f"Active device: {site_cfg['device_ip']}")
-
-# Settings remain hidden until the Settings button is pressed.
-with st.sidebar:
-    if st.session_state.show_settings:
-        st.markdown("## ⚙ Settings")
-        st.markdown("---")
-        st.caption(f"Active site: {site_cfg['label']}")
-        device_ip = st.text_input(
-            "Device IP:Port",
-            value=site_cfg["device_ip"],
-            key=f"cfg_ip_{st.session_state.selected_site}",
-        )
-        username = st.text_input(
-            "Username",
-            value=site_cfg["username"],
-            key=f"cfg_user_{st.session_state.selected_site}",
-        )
-        password = st.text_input(
-            "Password",
-            value=site_cfg["password"],
-            type="password",
-            key=f"cfg_pass_{st.session_state.selected_site}",
-        )
-        st.markdown("---")
-        st.markdown("**Shift Rules**")
-        shift_lines = ""
-        for department_key in DEPT_ORDER:
-            department = ALL_EMPLOYEES.get(department_key, {})
-            if department:
-                shift_lines += (
-                    f"<b>{department['label']}</b><br>"
-                    f"{department['shift']}<br><br>"
-                )
-        st.markdown(
-            f"<div style='font-size:12px'>{shift_lines}</div>",
-            unsafe_allow_html=True,
-        )
-        if st.button("✕ Close Settings", key="close_settings"):
-            st.session_state.show_settings = False
-            try:
-                st.rerun()
-            except AttributeError:
-                st.experimental_rerun()
 
 st.markdown("---")
 
