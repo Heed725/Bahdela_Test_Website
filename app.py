@@ -1,6 +1,6 @@
 """
 Multi-Site Daily Shift Report — Streamlit App
-Supports: Buguruni, Puma Upanga, Puma Ocean Road, Puma Survey, Livingstone
+Supports: Buguruni, Puma Upanga, Puma Ocean Road, Puma Survey, India, Livingstone
 Run with:  python app.py   OR   streamlit run app.py
 """
 
@@ -9,7 +9,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 import urllib3
 import io, sys, subprocess, os
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
 
 from docx import Document
@@ -32,7 +32,21 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Tanzania uses UTC+03:00 throughout the year. Using a fixed offset keeps the
+# current-day morning/afternoon logic reliable on Windows and Linux servers.
+APP_TIMEZONE = timezone(timedelta(hours=3))
+MORNING_CHECKOUT_CUTOFF_HOUR = 12
+
+def local_now():
+    return datetime.now(APP_TIMEZONE)
+
+def hide_current_day_checkout(day_str, now_value=None):
+    """Hide today's checkout before 12:00 Tanzania time."""
+    now_value = now_value or local_now()
+    return (
+        day_str == now_value.date().isoformat()
+        and now_value.hour < MORNING_CHECKOUT_CUTOFF_HOUR
+    )
 
 # ── AUTO-LAUNCH ────────────────────────────────────────────────
 # Only relaunch if we were NOT already started by streamlit.
@@ -331,7 +345,7 @@ SITES = {
         "dept_colors": {"Shop":"#8B0000"},
         "employees": {
             "Shop": {
-                "label":"SHOP", "shift":"Shift: 08:00 - 16:30",
+                "label":"SHOP", "shift":"Shift: 08:00 - 17:00",
                 "header_hex":"8B0000",
                 "members":[
                     "Silivester William Yakobo",
@@ -512,10 +526,17 @@ def parse_by_day(events):
         emp_names[emp_id]=name or f"ID {emp_id}"
         t=str(ev.get("time") or "")
         if len(t)>=16: emp_days[emp_id][t[:10]].append(t[11:16])
+
     rows=[]
+    now_value=local_now()
     for emp_id,days in emp_days.items():
         for day_str,times in sorted(days.items()):
-            times=sorted(times); ci=times[0]; co=times[-1] if len(times)>1 else "-"
+            times=sorted(times)
+            ci=times[0]
+            raw_co=times[-1] if len(times)>1 else "-"
+            # During today's morning hours, every scan is treated as a check-in.
+            # Checkout and worked hours become visible from 12:00 onward.
+            co="-" if hide_current_day_checkout(day_str, now_value) else raw_co
             rows.append({"name":emp_names[emp_id],"employee_id":emp_id,
                          "date":day_str,"check_in":ci,"check_out":co,
                          "hours":calc_hours(ci,co),"mins":calc_mins(ci,co)})
@@ -730,8 +751,8 @@ def build_docx_daily(rows_by_date,start_date,end_date,site="Buguruni"):
                 _wc(rw.cells[1],rec["name"],bg=fill)
                 _wc(rw.cells[2],rec["employee_id"],align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
                 _wc(rw.cells[3],rec["check_in"],bold=True,color=ci_tc,align=WD_ALIGN_PARAGRAPH.CENTER,bg=ci_bg)
-                _wc(rw.cells[4],rec["check_out"] if rec["check_out"]!="-" else "-",align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
-                _wc(rw.cells[5],rec["hours"] if rec["hours"]!="-" else "-",align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
+                _wc(rw.cells[4],rec["check_out"] if rec["check_out"]!="-" else "",align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
+                _wc(rw.cells[5],rec["hours"] if rec["hours"]!="-" else "",align=WD_ALIGN_PARAGRAPH.CENTER,bg=fill)
             for j,nm in enumerate(pd["absent"]):
                 rw=tbl.add_row(); _rh(rw,0.6)
                 configured_id = get_configured_employee_id(dk, nm)
@@ -858,8 +879,8 @@ def build_pdf_daily(rows_by_date,start_date,end_date,site="Buguruni"):
                 data.append([RP(str(idx+1),size=8,align=TA_CENTER),RP(rec["name"],size=8),
                               RP(rec["employee_id"],size=8,align=TA_CENTER),
                               RP(rec["check_in"],bold=True,size=8,color=ci_tc,align=TA_CENTER),
-                              RP(rec["check_out"] if rec["check_out"]!="-" else "-",size=8,align=TA_CENTER),
-                              RP(rec["hours"] if rec["hours"]!="-" else "-",size=8,align=TA_CENTER)])
+                              RP(rec["check_out"] if rec["check_out"]!="-" else "",size=8,align=TA_CENTER),
+                              RP(rec["hours"] if rec["hours"]!="-" else "",size=8,align=TA_CENTER)])
                 ri=len(data)-1
                 style.append(("BACKGROUND",(0,ri),(-1,ri),fill))
                 style.append(("BACKGROUND",(3,ri),(3,ri),ci_bg))
@@ -991,8 +1012,8 @@ def build_xlsx_daily(rows_by_date,start_date,end_date,site="Buguruni"):
                 ws.row_dimensions[cur].height=16
                 fh="FFFFF0" if idx%2==0 else "FFF3CD"
                 ci_bg,ci_tc=checkin_fill(dk,rec["check_in"])
-                co=rec["check_out"] if rec["check_out"]!="-" else "-"
-                hrs=rec["hours"] if rec["hours"]!="-" else "-"
+                co=rec["check_out"] if rec["check_out"]!="-" else ""
+                hrs=rec["hours"] if rec["hours"]!="-" else ""
                 for i,(val,al,fhx,fc) in enumerate(zip(
                         [idx+1,rec["name"],rec["employee_id"],rec["check_in"],co,hrs],
                         AL,[fh,fh,fh,ci_bg,fh,fh],["2D2D2D","2D2D2D","2D2D2D",ci_tc,"2D2D2D","2D2D2D"])):
@@ -1158,7 +1179,7 @@ st.markdown("---")
 st.markdown("### Date Range")
 preset_col, _, dc1, dc2 = st.columns([3,0.3,2,2])
 with preset_col:
-    preset = st.selectbox("Quick select", ["Custom","Today","Yesterday","This week","Last week","This month","Last month"], index=0)
+    preset = st.selectbox("Quick select", ["Custom","Today","Yesterday","This week","Last week","This month","Last month"], index=1)
 
 today = date.today()
 if preset=="Today":
@@ -1177,7 +1198,7 @@ elif preset=="Last month":
     default_end=first_this-timedelta(days=1)
     default_start=default_end.replace(day=1)
 else:
-    default_start=default_end=today-timedelta(days=1)
+    default_start=default_end=today
 
 with dc1:
     start_date = st.date_input("From", value=default_start, max_value=today)
@@ -1201,7 +1222,7 @@ st.markdown(f"<small style='color:{MUTED}'>{num_days} day(s) selected — <b>{pe
 st.markdown("---")
 
 # ── Generate ──────────────────────────────────────────────────
-if st.button("Generate Reports"):
+if st.button("View / Generate Reports"):
     progress=st.progress(0.0); status=st.empty()
 
     def upd(val,msg): progress.progress(val); status.info(msg)
@@ -1264,40 +1285,131 @@ if st.button("Generate Reports"):
 
     progress.progress(1.0); status.success("Reports ready!")
 
-    # ── Tabs: Daily | Summary ─────────────────────────────────
-    st.markdown("### Download Reports")
-    tab1,tab2=st.tabs([f"Daily ({num_days} day{'s' if num_days>1 else ''})",
-                       f"{period_label} Summary"])
+    # ── Viewer and downloads ──────────────────────────────────
+    st.markdown("### Report Options")
+    viewer_tab, downloads_tab = st.tabs(["Viewer", "Downloads"])
 
-    with tab1:
-        d1,d2,d3=st.columns(3)
-        with d1:
-            st.download_button("Download Word (.docx)",data=docx_daily,
-                file_name=f"{site_label}_Daily_{tag}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        with d2:
-            st.download_button("Download PDF",data=pdf_daily,
-                file_name=f"{site_label}_Daily_{tag}.pdf",mime="application/pdf")
-        with d3:
-            st.download_button("Download Excel (.xlsx)",data=xlsx_daily,
-                file_name=f"{site_label}_Daily_{tag}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with viewer_tab:
+        current_local = local_now()
+        if start_date == end_date == current_local.date():
+            if current_local.hour < MORNING_CHECKOUT_CUTOFF_HOUR:
+                st.info(
+                    "Morning view: check-in times are shown. Checkout and hours worked "
+                    "remain blank until 12:00 PM Tanzania time."
+                )
+            else:
+                st.caption(
+                    "Afternoon/evening view: recorded check-in and checkout times are shown."
+                )
 
-    with tab2:
-        st.markdown(f"<small style='color:{MUTED}'>One row per employee — days present/absent, average check-in/out, total hours worked across the selected period.</small>",
-                    unsafe_allow_html=True)
-        d1,d2,d3=st.columns(3)
-        with d1:
-            st.download_button("Download Word (.docx)",data=docx_summ,
-                file_name=f"{site_label}_{period_label}Summary_{tag}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        with d2:
-            st.download_button("Download PDF",data=pdf_summ,
-                file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",mime="application/pdf")
-        with d3:
-            st.download_button("Download Excel (.xlsx)",data=xlsx_summ,
-                file_name=f"{site_label}_{period_label}Summary_{tag}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        daily_view_tab, summary_view_tab = st.tabs([
+            f"Daily Attendance ({num_days} day{'s' if num_days > 1 else ''})",
+            f"{period_label} Summary",
+        ])
+
+        with daily_view_tab:
+            view_day = start_date
+            while view_day <= end_date:
+                day_key = view_day.strftime("%Y-%m-%d")
+                st.markdown(f"#### {view_day.strftime('%A, %d %B %Y')}")
+                day_data = build_dept_data(rows_by_date.get(day_key, []))
+
+                for dk in DEPT_ORDER:
+                    department = ALL_EMPLOYEES[dk]
+                    attendance = day_data[dk]
+                    st.markdown(
+                        f"**{department['label']}** — {department['shift']} "
+                        f"({len(attendance['present'])} present, {len(attendance['absent'])} absent)"
+                    )
+
+                    viewer_rows = []
+                    for rec in attendance["present"]:
+                        viewer_rows.append({
+                            "Status": "Present",
+                            "Employee Name": rec["name"],
+                            "ID": rec["employee_id"],
+                            "Check In": rec["check_in"],
+                            "Check Out": "" if rec["check_out"] == "-" else rec["check_out"],
+                            "Hours Worked": "" if rec["hours"] == "-" else rec["hours"],
+                        })
+                    for absent_name in attendance["absent"]:
+                        viewer_rows.append({
+                            "Status": "Absent",
+                            "Employee Name": absent_name,
+                            "ID": get_configured_employee_id(dk, absent_name),
+                            "Check In": "",
+                            "Check Out": "",
+                            "Hours Worked": "",
+                        })
+
+                    if viewer_rows:
+                        st.dataframe(
+                            viewer_rows,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_order=[
+                                "Status", "Employee Name", "ID",
+                                "Check In", "Check Out", "Hours Worked",
+                            ],
+                        )
+                view_day += timedelta(days=1)
+
+        with summary_view_tab:
+            st.caption(
+                "One row per employee showing attendance totals and average times "
+                "for the selected period."
+            )
+            for dk in DEPT_ORDER:
+                department = ALL_EMPLOYEES[dk]
+                st.markdown(f"**{department['label']}** — {department['shift']}")
+                summary_rows = []
+                for rec in summary[dk]:
+                    summary_rows.append({
+                        "Employee Name": rec["name"],
+                        "ID": rec["id"],
+                        "Days Present": rec["days_present"],
+                        "Days Absent": rec["days_absent"],
+                        "Average Check In": "" if rec["avg_in"] == "-" else rec["avg_in"],
+                        "Average Check Out": "" if rec["avg_out"] == "-" else rec["avg_out"],
+                        "Total Hours": "" if rec["total_hrs"] == "-" else rec["total_hrs"],
+                    })
+                st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+    with downloads_tab:
+        daily_download_tab, summary_download_tab = st.tabs([
+            f"Daily ({num_days} day{'s' if num_days > 1 else ''})",
+            f"{period_label} Summary",
+        ])
+
+        with daily_download_tab:
+            d1,d2,d3=st.columns(3)
+            with d1:
+                st.download_button("Download Word (.docx)",data=docx_daily,
+                    file_name=f"{site_label}_Daily_{tag}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            with d2:
+                st.download_button("Download PDF",data=pdf_daily,
+                    file_name=f"{site_label}_Daily_{tag}.pdf",mime="application/pdf")
+            with d3:
+                st.download_button("Download Excel (.xlsx)",data=xlsx_daily,
+                    file_name=f"{site_label}_Daily_{tag}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        with summary_download_tab:
+            st.markdown(f"<small style='color:{MUTED}'>One row per employee — days present/absent, average check-in/out, total hours worked across the selected period.</small>",
+                        unsafe_allow_html=True)
+            d1,d2,d3=st.columns(3)
+            with d1:
+                st.download_button("Download Word (.docx)",data=docx_summ,
+                    file_name=f"{site_label}_{period_label}Summary_{tag}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            with d2:
+                st.download_button("Download PDF",data=pdf_summ,
+                    file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",mime="application/pdf")
+            with d3:
+                st.download_button("Download Excel (.xlsx)",data=xlsx_summ,
+                    file_name=f"{site_label}_{period_label}Summary_{tag}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown("---")
 st.markdown(f"<small style='color:{MUTED}'>{site_cfg['label']} Shift Report System</small>",unsafe_allow_html=True)
