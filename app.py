@@ -1595,8 +1595,11 @@ if st.button("View / Generate Reports"):
 
     # ── Viewer and downloads ──────────────────────────────────
     st.markdown("### Report Options")
-    st.caption("Choose a button below to view the report on screen or download report files.")
-    viewer_tab, downloads_tab = st.tabs(["👁  View Reports", "⬇  Download Reports"])
+    st.caption(
+        "Download Reports opens by default. Select View Reports to preview "
+        "the generated report directly on screen."
+    )
+    downloads_tab, viewer_tab = st.tabs(["Download Reports", "View Reports"])
 
     with viewer_tab:
         current_local = local_now()
@@ -1696,6 +1699,10 @@ if st.button("View / Generate Reports"):
                 st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
     with downloads_tab:
+        st.info(
+            "The download section is open by default. You can also select "
+            "View Reports above to view the full report on screen before downloading."
+        )
         daily_download_tab, summary_download_tab = st.tabs([
             f"Daily ({num_days} day{'s' if num_days > 1 else ''})",
             f"{period_label} Summary",
@@ -1704,14 +1711,14 @@ if st.button("View / Generate Reports"):
         with daily_download_tab:
             d1,d2,d3=st.columns(3)
             with d1:
-                st.download_button("⬇ Download Word (.docx)",data=docx_daily,
+                st.download_button("Download Word (.docx)",data=docx_daily,
                     file_name=f"{site_label}_Daily_{tag}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             with d2:
-                st.download_button("⬇ Download PDF",data=pdf_daily,
+                st.download_button("Download PDF",data=pdf_daily,
                     file_name=f"{site_label}_Daily_{tag}.pdf",mime="application/pdf")
             with d3:
-                st.download_button("⬇ Download Excel (.xlsx)",data=xlsx_daily,
+                st.download_button("Download Excel (.xlsx)",data=xlsx_daily,
                     file_name=f"{site_label}_Daily_{tag}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -1720,14 +1727,14 @@ if st.button("View / Generate Reports"):
                         unsafe_allow_html=True)
             d1,d2,d3=st.columns(3)
             with d1:
-                st.download_button("⬇ Download Word (.docx)",data=docx_summ,
+                st.download_button("Download Word (.docx)",data=docx_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             with d2:
-                st.download_button("⬇ Download PDF",data=pdf_summ,
+                st.download_button("Download PDF",data=pdf_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.pdf",mime="application/pdf")
             with d3:
-                st.download_button("⬇ Download Excel (.xlsx)",data=xlsx_summ,
+                st.download_button("Download Excel (.xlsx)",data=xlsx_summ,
                     file_name=f"{site_label}_{period_label}Summary_{tag}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
