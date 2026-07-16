@@ -1545,15 +1545,10 @@ if st.button("View / Generate Reports"):
     with viewer_tab:
         current_local = local_now()
         if start_date == end_date == current_local.date():
-            if current_local.hour < MORNING_CHECKOUT_CUTOFF_HOUR:
-                st.info(
-                    "Morning view: check-in times are shown. Checkout and hours worked "
-                    "remain blank until 2:00 PM Tanzania time."
-                )
-            else:
-                st.caption(
-                    "Afternoon/evening view: recorded check-in and checkout times are shown."
-                )
+            st.info(
+                "Today's checkout is shown only when an employee scans at the allocated "
+                "shift ending time or later. Earlier or repeated scans remain blank."
+            )
 
         st.markdown(
             """
