@@ -280,9 +280,10 @@ SITES = {
         "device_ip": "217.29.138.10:4376",
         "username": "admin",
         "password": "Bahdela01",
-        "dept_order": ["Shop","Manufactural","Store","Oil","Walinzi"],
+        "dept_order": ["Shop","Manufactural","Store","Oil","Walinzi","Buguruni Masjid"],
         "dept_colors": {"Shop":"#8B0000","Manufactural":"#7B3F00","Store":"#B8860B",
-                        "Oil":"#4B0082","Walinzi":"#555555"},
+                        "Oil":"#4B0082","Walinzi":"#555555",
+                        "Buguruni Masjid":"#00695C"},
         "employees": {
             "Shop": {
                 "label":"SHOP", "shift":"Shift: 08:00 - 16:30", "header_hex":"8B0000",
@@ -309,14 +310,25 @@ SITES = {
                 "header_hex":"4B0082",
                 "members":["Abdul Timanya Renatus","Ahmed Ally Mpogo","Azihar Mwijage Mzamiru",
                            "Bashiru Said Mgodoka","Iddi Rashidi Abdallah","Issa Sharahbil Siraji",
-                           "Juma Othmani Issa","Mohamed Abdallah Hamad","Muhsin Oscar Matikila",
-                           "Shali Sebe Bazo","Wilibald Antigon Urio"],
+                           "Juma Othmani Issa","Juma Yahya Bilal","Mohamed Abdallah Hamad",
+                           "Muhsin Oscar Matikila","Shali Sebe Bazo","Wilibald Antigon Urio"],
+                "member_ids": {
+                    "Juma Yahya Bilal":"9089",
+                },
             },
             "Walinzi": {
                 "label":"WALINZI (SECURITY)", "shift":"Shift: 09:00 - 09:00 (24 Hrs)",
                 "header_hex":"1A1A1A",
                 "members":["Anderson Mude Faru","Dickson Dickson Haule","Fadhili Ahmad Abdlaah",
                            "Fikiri Amani Abdallah","John Jofery Kapiki","Shamte Rashid Likwira"],
+            },
+            "Buguruni Masjid": {
+                "label":"BUGURUNI MASJID", "shift":"Shift: 08:30 - 17:00",
+                "header_hex":"00695C",
+                "members":["Jaffari Omari Juma"],
+                "member_ids": {
+                    "Jaffari Omari Juma":"6055",
+                },
             },
         },
     },
@@ -412,7 +424,7 @@ SITES = {
                 "members":[
                     "Abdallah Abdi Rashidi","Ally Msabaha Ally","Amina Alawi Juma",
                     "Dotto Sultan Kingalu","Esha Jamali Kessy","Juma Alawi Juma",
-                    "Mahamuod Said Mgawe","Mohamed Abdallah Kambi","Mohamed Ally Mzee",
+                    "Mahamuod Said Mgawe","Mohamed Abdallah Kambi",
                     "Mulla Omari Kadari","Mzee Hamis Kassim","Omari Yusufu Shebly",
                     "Said Ramadhani Mnjama","Salim Siraji Bajuni","Salmin Mdhihiri Yahaya",
                     "Salmu Omari Siraji","Thomas Constans Kereza","Zahoro Rashidi Mbotoni",
@@ -470,12 +482,21 @@ SITES = {
                     "Abdul Abbas Bajuni","Waziri Hatibu Waziri","Swed Khalfan Kailo",
                     "Issa Ally Juma","Zulfa Rashid Mkamba","Yassini Siraji Athumani",
                     "Yahya Mwahimu Abdul","William Joisack Maliselo","Siraji Yassini Siraji",
-                    "Mustani Juberi Ngoda","Mshija Juma Lukuba","Jasmin Warid Idd",
+                    "Mshija Juma Lukuba","Jasmin Warid Idd",
                     "Hassani Hashimu Mpasule","Haruni Kenedy Saimoni","Haruna Muhamedi Haruna",
                     "Hamisi Abdull Siraji","France John Mapunda","Fikirini Rashidi Mussa",
                     "Baraka Raymond Daa","Abuu Jafari Salehe","Abdul Amir Mwishaha",
-                    "Abdallah Ally Abdallah",
+                    "Abdallah Ally Abdallah","Khalfan Suleiman Ali",
+                    "Glory Asajile Mwaipaja","Amiri Siraji Nurdini",
+                    "Albati Donasiani Kitali",
                 ],
+                "member_ids": {
+                    "Khalfan Suleiman Ali":"4011",
+                    "Glory Asajile Mwaipaja":"7011",
+                    "Amiri Siraji Nurdini":"7012",
+                    "Issa Ally Juma":"7013",
+                    "Albati Donasiani Kitali":"7014",
+                },
             },
             "Cleaning": {
                 "label":"CLEANING / HOUSEKEEPING", "shift":"Shift: 08:00 - 17:00",
@@ -488,8 +509,12 @@ SITES = {
                 "label":"SUPERVISORS / MANAGEMENT", "shift":"Shift: 08:00 - 17:00",
                 "header_hex":"7B3F00",
                 "members":[
-                    "Omar Abdallah Bahdela","Donald Gasper Kalafya",
+                    "Omar Abdallah Bahdela","Donald Gasper Kalafya","Mustani Juberi Ngonda",
+                    "Mohamed Ally Mzee",
                 ],
+                "member_ids": {
+                    "Mohamed Ally Mzee":"1409",
+                },
             },
             "Wakala": {
                 "label":"WAKALA", "shift":"Shift: 08:00 - 17:00",
@@ -511,7 +536,10 @@ SITES = {
         "dept_colors": {"Shop":"#8B0000"},
         "employees": {
             "Shop": {
-                "label":"SHOP", "shift":"Shift: 08:00 - 17:00",
+                # Display the official shift end as 16:30, but accept an actual
+                # checkout scan made at any time from 16:00 through 17:00.
+                "label":"SHOP", "shift":"Shift: 08:00 - 16:30",
+                "checkout_window":"16:00 - 17:00",
                 "header_hex":"8B0000",
                 "members":[
                     "Silivester William Yakobo",
@@ -661,6 +689,37 @@ def get_shift_window(dept_key, check_in_dt):
     return shift_start, shift_end
 
 
+def get_checkout_window(dept_key, allocated_end):
+    """
+    Return the earliest and latest accepted checkout timestamps.
+
+    Departments without a custom checkout_window continue using the normal rule:
+    checkout starts at the configured shift end and remains valid for the grace
+    period. India Shop configures 16:00-17:00 while displaying a 16:30 shift end.
+    """
+    department = ALL_EMPLOYEES.get(dept_key, {})
+    window_text = str(department.get("checkout_window", "")).strip()
+    matches = SHIFT_TIME_PATTERN.findall(window_text)
+
+    if not matches:
+        return allocated_end, allocated_end + timedelta(hours=CHECKOUT_GRACE_HOURS)
+
+    start_text, end_text = matches[0]
+    start_minute = to_min(start_text)
+    end_minute = to_min(end_text)
+    if start_minute is None or end_minute is None:
+        return allocated_end, allocated_end + timedelta(hours=CHECKOUT_GRACE_HOURS)
+
+    window_day = allocated_end.replace(hour=0, minute=0, second=0, microsecond=0)
+    checkout_start = window_day + timedelta(minutes=start_minute)
+    checkout_end = window_day + timedelta(minutes=end_minute)
+
+    if checkout_end < checkout_start:
+        checkout_end += timedelta(days=1)
+
+    return checkout_start, checkout_end
+
+
 def parse_event_datetime(value):
     """Parse device timestamps and normalize them to Tanzania time."""
     raw = str(value or "").strip()
@@ -773,9 +832,9 @@ def parse_by_day(events, report_start=None, report_end=None):
     """
     Build attendance rows from chronological scans.
 
-    Checkout is accepted only at the allocated shift ending time or later.
-    Repeated scans before shift end are ignored, so checkout and worked hours
-    remain blank when there is no valid checkout scan.
+    Checkout is accepted within the department's configured checkout window.
+    By default, that window begins at the allocated shift end and continues
+    through the normal grace period. Earlier duplicate scans are ignored.
     """
     employee_scans = defaultdict(list)
     employee_names = {}
@@ -801,7 +860,6 @@ def parse_by_day(events, report_start=None, report_end=None):
         employee_scans[employee_id].append(scan_time)
 
     rows = []
-    grace = timedelta(hours=CHECKOUT_GRACE_HOURS)
 
     for employee_id, scans in employee_scans.items():
         scans = sorted(set(scans))
@@ -812,6 +870,10 @@ def parse_by_day(events, report_start=None, report_end=None):
         while index < len(scans):
             check_in_dt = scans[index]
             _, allocated_end = get_shift_window(department_key, check_in_dt)
+            checkout_start, checkout_deadline = get_checkout_window(
+                department_key,
+                allocated_end,
+            )
 
             checkout_dt = None
             checkout_index = None
@@ -821,15 +883,14 @@ def parse_by_day(events, report_start=None, report_end=None):
             while candidate_index < len(scans):
                 candidate = scans[candidate_index]
 
-                # Ignore duplicate/extra scans made before the shift ends.
-                if candidate < allocated_end:
+                # Ignore duplicate/extra scans made before checkout is allowed.
+                if candidate < checkout_start:
                     next_index = candidate_index + 1
                     candidate_index += 1
                     continue
 
-                # The first scan at shift end or later is checkout, provided it
-                # is still reasonably close to that allocated shift.
-                if candidate <= allocated_end + grace:
+                # Accept the first scan inside the configured checkout window.
+                if candidate <= checkout_deadline:
                     checkout_dt = candidate
                     checkout_index = candidate_index
                 break
