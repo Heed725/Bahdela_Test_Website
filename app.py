@@ -339,11 +339,12 @@ SITES = {
         "username": "admin",
         "password": "Bahdela01",
         "dept_order": [
-            "Oil", "Oil Supervisor", "Oil Logistics",
+            "Oil", "Oil Lubricant", "Oil Supervisor", "Oil Logistics",
             "Supermarket", "Security", "Cleaner",
         ],
         "dept_colors": {
             "Oil":"#4B0082",
+            "Oil Lubricant":"#00695C",
             "Oil Supervisor":"#7B3F00",
             "Oil Logistics":"#8B4500",
             "Supermarket":"#8B0000",
@@ -355,16 +356,28 @@ SITES = {
                 "label":"OIL", "shift":"Shifts: 07:00-14:00 | 14:00-19:00 | 19:00-06:00",
                 "header_hex":"4B0082",
                 "members":[
-                    "Abdallah Salehe Kilindo","Abdul Jumbe Yusuf","Aisha Mustapha Losili",
+                    "Abdul Jumbe Yusuf","Aisha Mustapha Losili",
                     "Asha Abdallah Ngasinda","Athumani Yusuph Sheby","Ayubu Salehe Kesi",
                     "Bakari Saidi Mchingwi","Bihasanati Saidi Nzige","Daudi Rashidi Sharabile",
                     "Elibariki Geofrey Mshana","Hamadi Adinani Iddi","Hamlati Shaibu Ghindu",
-                    "Jamali Sadi Kilindo","Juma Mussa Juma","Juma Mwamedi Ngakola",
+                    "Jamali Sadi Kilindo","Juma Mussa Juma",
                     "Kelvin Lukemelo Mlowe","Mnyeto Miraji Rashidi",
                     "Ramadhani Abdallah Ally","Hassani Muhidini Masenga",
                     "Rashidi Majau Masai","Ramadhan Mohamed Yusuph",
                     "Rajabu Ijumaa Hizza","Nesha Habib Losiri","Msabaha Ally Msabaha",
                 ],
+            },
+            "Oil Lubricant": {
+                "label":"OIL LUBRICANT",
+                "shift":"Shifts: 07:00-14:00 | 14:00-19:00 | 19:00-06:00",
+                "header_hex":"00695C",
+                "members":[
+                    "Juma Mwamedi Ngakola","Abdallah Salehe Kilindo",
+                ],
+                "member_ids": {
+                    "Juma Mwamedi Ngakola":"1375",
+                    "Abdallah Salehe Kilindo":"1385",
+                },
             },
             "Oil Supervisor": {
                 "label":"OIL SUPERVISOR", "shift":"Shifts: 06:00-18:00 | 18:00-06:00",
@@ -528,7 +541,7 @@ SITES = {
 
     "India": {
         "label": "India",
-        # Store only IP:port because fetch_events() adds the http:// prefix.
+        # IP:port is accepted; fetch_events() also supports complete HTTP/HTTPS URLs.
         "device_ip": "102.221.20.46:4440",
         "username": "admin",
         "password": "Bahdela01",
@@ -554,6 +567,76 @@ SITES = {
                     "Ally Salum Sultani":"6003",
                     "Ally Omar Mohamed":"6002",
                     "Ahmed Mohamed Bahdela":"6001",
+                },
+            },
+        },
+    },
+
+    "Kibaha": {
+        "label": "Kibaha",
+        # ngrok HTTPS base address. Do not include the Swagger /doc/index.html path.
+        "device_ip": "https://agent-unsavory-scope.ngrok-free.dev",
+        "username": "admin",
+        "password": "Bahdela01",
+        "dept_order": ["Staff"],
+        "dept_colors": {"Staff":"#00695C"},
+        "employees": {
+            "Staff": {
+                "label":"KIBAHA STAFF",
+                # Default day shift used until Kibaha department/shift details are supplied.
+                "shift":"Shift: 08:00 - 17:00",
+                "header_hex":"00695C",
+                "members":[
+                    "Latifa Mohammed Salum",
+                    "Bushiri Hassan Kipita",
+                    "Zainab Siraj",
+                    "Silvia Cosmas Mtamise",
+                    "Dunia Ally Shomari",
+                    "Jamila Ernest Mswao",
+                    "Idd Adnan Idd",
+                    "Warda Said",
+                    "Vendeline Aniseth William",
+                    "Siraj Tenga",
+                    "Siraj Abdul",
+                    "Sheha Shomary Kitanda",
+                    "Shabani Mussa Saidi",
+                    "Nasimu Omary Siraj",
+                    "Mariam Siraj",
+                    "Kasimiri Antony",
+                    "James Patrick Mhanga",
+                    "Khamis Kadulyu Kaswahili",
+                    "Daniel Ibrahim Mwambayle",
+                    "Ally Malozo",
+                    "Ally Hassan Ally",
+                    "Abdulkarim Abdallah Kilindo",
+                    "Yahaya Abdallah Msangule",
+                    "Omar Walid Iddi",
+                ],
+                "member_ids": {
+                    "Latifa Mohammed Salum":"5024",
+                    "Bushiri Hassan Kipita":"5023",
+                    "Zainab Siraj":"5022",
+                    "Silvia Cosmas Mtamise":"5021",
+                    "Dunia Ally Shomari":"5020",
+                    "Jamila Ernest Mswao":"5019",
+                    "Idd Adnan Idd":"5018",
+                    "Warda Said":"5017",
+                    "Vendeline Aniseth William":"5016",
+                    "Siraj Tenga":"5015",
+                    "Siraj Abdul":"5014",
+                    "Sheha Shomary Kitanda":"5013",
+                    "Shabani Mussa Saidi":"5012",
+                    "Nasimu Omary Siraj":"5011",
+                    "Mariam Siraj":"5010",
+                    "Kasimiri Antony":"5009",
+                    "James Patrick Mhanga":"5008",
+                    "Khamis Kadulyu Kaswahili":"5007",
+                    "Daniel Ibrahim Mwambayle":"5006",
+                    "Ally Malozo":"5005",
+                    "Ally Hassan Ally":"5004",
+                    "Abdulkarim Abdallah Kilindo":"5003",
+                    "Yahaya Abdallah Msangule":"5002",
+                    "Omar Walid Iddi":"5001",
                 },
             },
         },
@@ -740,8 +823,8 @@ def parse_event_datetime(value):
 def checkin_fill(dept_key,check_in):
     ci=to_min(check_in)
     if ci is None: return "EEEEEE","999999"
-    # Oil shifts: 06:00(360) or 07:00(420) start, 14:00(840), 19:00(1140)
-    if dept_key in ("Oil",):
+    # Oil and Oil Lubricant shifts: 06:00/07:00 start, 14:00, 19:00
+    if dept_key in ("Oil", "Oil Lubricant"):
         if ci < 840:   ss = 360   # morning shift start 06:00 or 07:00
         elif ci < 1140: ss = 840  # afternoon 14:00
         else:           ss = 1140 # night 19:00
@@ -1012,19 +1095,50 @@ def avg_time(tl):
     except: return "-"
 
 # ── FETCH ─────────────────────────────────────────────────────
+def normalize_device_base(device_ip):
+    """Return a clean HTTP/HTTPS base URL for an IP, hostname, or ngrok address."""
+    base = str(device_ip or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("Device address is empty")
+    if not re.match(r"^https?://", base, flags=re.IGNORECASE):
+        base = f"http://{base}"
+    return base
+
+
 def fetch_events(device_ip,username,password,start_date,end_date,progress_cb=None):
-    url=f"http://{device_ip}/ISAPI/AccessControl/AcsEvent?format=json"
+    try:
+        base_url = normalize_device_base(device_ip)
+    except ValueError as exc:
+        return None, str(exc)
+
+    url=f"{base_url}/ISAPI/AccessControl/AcsEvent?format=json"
     auth=HTTPDigestAuth(username,password)
+    headers={"Accept":"application/json"}
+
+    # Suppress the free ngrok browser interstitial while preserving Digest Auth.
+    if "ngrok-free." in base_url.lower():
+        headers["ngrok-skip-browser-warning"] = "true"
+
     all_events,position,page=[],0,1
     while True:
         payload={"AcsEventCond":{"searchID":"1","searchResultPosition":position,
             "maxResults":30,"major":0,"minor":0,
             "startTime":f"{start_date}T00:00:00+03:00",
             "endTime":f"{end_date}T23:59:59+03:00"}}
-        try: r=requests.post(url,auth=auth,json=payload,timeout=15,verify=False)
-        except requests.exceptions.RequestException as e: return None,str(e)
-        if r.status_code!=200: return None,f"HTTP {r.status_code}: {r.text[:200]}"
-        block=r.json().get("AcsEvent",{}); events=block.get("InfoList",[])
+        try:
+            r=requests.post(
+                url, auth=auth, json=payload, headers=headers,
+                timeout=25, verify=False,
+            )
+        except requests.exceptions.RequestException as e:
+            return None,str(e)
+        if r.status_code!=200:
+            return None,f"HTTP {r.status_code}: {r.text[:200]}"
+        try:
+            block=r.json().get("AcsEvent",{})
+        except ValueError:
+            return None, f"Device returned non-JSON content: {r.text[:200]}"
+        events=block.get("InfoList",[])
         total=block.get("totalMatches",0); num=block.get("numOfMatches",0)
         if not events: break
         all_events.extend(events); position+=num
