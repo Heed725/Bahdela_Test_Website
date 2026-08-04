@@ -755,8 +755,8 @@ def configure_mobile_manager():
                 "header_hex": "5A0000",
                 "members": [MOBILE_MANAGER_NAME],
             }
-            if MOBILE_MANAGER_HOME_DEPT not in site["dept_order"]:
-                site["dept_order"].insert(0, MOBILE_MANAGER_HOME_DEPT)
+            # Keep it out of the static roster order. The section is inserted
+            # only after an actual Buguruni scan is found for the selected date.
             site["dept_colors"][MOBILE_MANAGER_HOME_DEPT] = "#5A0000"
         elif site_name == MOBILE_MANAGER_KIBAHA_SITE:
             # Kibaha is a secondary management location. Keep the department
@@ -1949,7 +1949,7 @@ if st.button("View / Generate Reports"):
     events,err=fetch_events(device_ip,username,password,start_date,end_date,upd)
     if err: st.error(f"Failed to fetch data: {err}"); st.stop()
 
-    progress.progress(0.56); status.info("Checking Mohamed Omar Bahdela across locations...")
+    progress.progress(0.56); status.info("Checking management movement across locations...")
     manager_events, location_failures = fetch_mobile_manager_events(
         st.session_state.selected_site, events, start_date, end_date,
     )
@@ -1972,23 +1972,23 @@ if st.button("View / Generate Reports"):
         if not same_employee_name(row.get("name"), MOBILE_MANAGER_NAME)
         or st.session_state.selected_site in row.get("visited_sites", [])
     ]
-    visiting_today = any(
+    mobile_present_here = any(
         same_employee_name(row.get("name"), MOBILE_MANAGER_NAME)
-        and st.session_state.selected_site != MOBILE_MANAGER_HOME_SITE
         for row in rows
     )
-    if visiting_today:
-        mobile_department = (
-            MOBILE_MANAGER_KIBAHA_DEPT
-            if st.session_state.selected_site == MOBILE_MANAGER_KIBAHA_SITE
-            else MOBILE_MANAGER_VISITOR_DEPT
-        )
+    if mobile_present_here:
+        if st.session_state.selected_site == MOBILE_MANAGER_HOME_SITE:
+            mobile_department = MOBILE_MANAGER_HOME_DEPT
+        elif st.session_state.selected_site == MOBILE_MANAGER_KIBAHA_SITE:
+            mobile_department = MOBILE_MANAGER_KIBAHA_DEPT
+        else:
+            mobile_department = MOBILE_MANAGER_VISITOR_DEPT
         if mobile_department not in DEPT_ORDER:
             DEPT_ORDER.append(mobile_department)
 
     if location_failures:
         st.warning(
-            "Mohamed's movement could not be checked at: "
+            "Management movement could not be checked at: "
             + ", ".join(sorted(location_failures))
             + ". The selected site's main report is still available."
         )
