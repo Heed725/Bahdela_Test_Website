@@ -5,6 +5,7 @@ Run with:  python app.py   OR   streamlit run app.py
 """
 
 import streamlit as st
+from employee_management import roster_store, render_login, render_management
 import requests
 import pandas as pd
 from requests.auth import HTTPDigestAuth
@@ -811,6 +812,15 @@ def sanitize_puma_upanga_config():
 
 
 sanitize_puma_upanga_config()
+
+# Apply saved employee placements after the original roster initialization.
+try:
+    management_store = roster_store()
+    management_store.apply(SITES)
+except Exception:
+    management_store = None
+    st.error("Saved employee placements could not be loaded. Check the roster data directory.")
+    st.stop()
 
 # ── Runtime site selection (resolved after sidebar renders) ───
 # These are set dynamically in the UI section below; defaults here
@@ -1864,13 +1874,21 @@ username = site_cfg["username"]
 password = site_cfg["password"]
 
 # Header — original simple structure with no Settings button.
-st.markdown(f"# {site_cfg['label']} Shift Reports")
+header_title, header_login = st.columns([8, 1.4], vertical_alignment="center")
+with header_title:
+    st.markdown(f"# {site_cfg['label']} Shift Reports")
+with header_login:
+    render_login()
 
 st.markdown(
     f"<p style='color:{MUTED};margin-top:-10px'>Daily attendance reports — "
     f"<b>{site_cfg['label']}</b> access control device.</p>",
     unsafe_allow_html=True,
 )
+
+if st.session_state.get("management_message"):
+    st.success(st.session_state.pop("management_message"))
+render_management(SITES, management_store)
 
 # One row of site choices. Clicking the site name changes the active site;
 # there are no separate Switch buttons.
