@@ -57,6 +57,27 @@ def delete_employee(state, client, store, employee, site, sites=None):
     store.save(actor, 'delete', employee['employeeNo'], employee['name'], source=site)
 
 
+def delete_employees(state, client, store, employees, site, sites):
+    """Delete only the checked people; retain failures for review or retry."""
+    require_permission(state, 'delete')
+    deleted, failed, seen = [], [], set()
+    for employee in employees:
+        employee_id = str(employee['employeeNo'])
+        if employee_id in seen:
+            continue
+        seen.add(employee_id)
+        try:
+            delete_employee(state, client, store, employee, site, sites=sites)
+            deleted.append(employee)
+        except HikvisionError as exc:
+            failed.append({'employee': employee, 'error': str(exc)})
+        except (OSError, sqlite3.Error):
+            failed.append({'employee': employee, 'error': 'The terminal may have changed, but its roster update could not be saved. Refresh the device list and check the data directory.'})
+            # Stop if storage fails; do not continue changing other terminals.
+            break
+    return {'deleted': deleted, 'failed': failed}
+
+
 def prepare_transfer(state, source_client, target_client, store, employee, source, target, department, sites=None, job=None):
     actor = require_permission(state, 'transfer')
     require_report_member(employee, source, sites, store)
@@ -192,22 +213,64 @@ def job_choice(site, department, sites, key):
     return choice
 
 
-def selected_employee(site, sites, key):
+def load_report_users(site, sites, key, clear_ticks=False):
     if st.button('Load / refresh report employees', key=key + '_refresh'):
         require_permission(st.session_state, 'list')
         st.session_state[key + '_users'] = client_for(site, sites).search_users()
+        if clear_ticks:
+            for widget_key in list(st.session_state):
+                if widget_key.startswith(key + '_tick_'):
+                    st.session_state.pop(widget_key, None)
     loaded = st.session_state.get(key + '_users')
     if loaded is None:
         st.info('Load employees assigned to this site’s report roster first.')
-        return None
+        return []
     users = filter_report_users(loaded, site, sites)
     if not users:
         st.info('No matching report-roster employees were found on this terminal.')
+    return users
+
+
+def selected_employee(site, sites, key):
+    users = load_report_users(site, sites, key)
+    if not users:
         return None
     choice = st.selectbox('Employee', [str(u['employeeNo']) for u in users], index=None,
         format_func=lambda employee_id: next(f"{u['employeeNo']} · {u['name']} · {u['department']} · {u['job']}"
                                              for u in users if str(u['employeeNo']) == employee_id), key=key + '_choice')
     return next((u for u in users if str(u['employeeNo']) == choice), None)
+
+
+def render_delete_list(site, sites, store):
+    key = 'manage_delete_' + site
+    results = st.session_state.get(key + '_results')
+    if results:
+        if results['deleted']:
+            st.success('Deleted from ' + site + ': ' + ', '.join(
+                f"{u['name']} (ID {u['employeeNo']})" for u in results['deleted']))
+        for failure in results['failed']:
+            employee = failure['employee']
+            st.error(f"{employee['name']} (ID {employee['employeeNo']}): {failure['error']}")
+    users = load_report_users(site, sites, key, clear_ticks=True)
+    if not users:
+        return
+    st.write('Tick the employees who should be removed from this location.')
+    selected = []
+    for employee in users:
+        if st.checkbox(f"{employee['name']} · ID {employee['employeeNo']} · {employee['department']} · {employee['job']}",
+                       key=key + '_tick_' + str(employee['employeeNo'])):
+            selected.append(employee)
+    st.caption(f'{len(selected)} of {len(users)} employees selected')
+    if selected:
+        st.warning(f"Delete {len(selected)} selected employee(s) from {site}? This permanently removes their terminal access, linked credentials and report roster placement at this location.")
+    if st.button('Delete selected employees', key=key + '_submit', disabled=not selected):
+        with st.spinner('Deleting the selected employees…'):
+            results = delete_employees(st.session_state, client_for(site, sites), store, selected, site, sites)
+        st.session_state[key + '_results'] = results
+        deleted_ids = {str(employee['employeeNo']) for employee in results['deleted']}
+        st.session_state[key + '_users'] = [u for u in st.session_state.get(key + '_users', [])
+                                           if str(u.get('employeeNo')) not in deleted_ids]
+        st.rerun()
 
 
 def enroll_employee(employee, site, sites, key):
@@ -309,14 +372,6 @@ def _render_management(sites, store):
     with delete_tab:
         site = st.selectbox('Delete from which location? *', names, index=None, key='manage_delete_site')
         if site:
-            employee = selected_employee(site, sites, 'manage_delete_' + site)
-            if employee:
-                st.warning(f"Delete {employee['name']} (ID {employee['employeeNo']}) from {site}? This removes their terminal access, linked credentials and report roster placement. Other locations are unchanged.")
-                typed = st.text_input('Type the employee ID to confirm deletion', key='manage_delete_confirm_' + site)
-                if st.button('Delete employee', disabled=typed.strip() != str(employee['employeeNo'])):
-                    delete_employee(st.session_state, client_for(site, sites), store, employee, site, sites=sites)
-                    st.session_state.pop('manage_delete_' + site + '_users', None)
-                    st.session_state['management_message'] = 'Employee deleted from ' + site
-                    st.rerun()
+            render_delete_list(site, sites, store)
     with history_tab:
         st.dataframe(store.history(), use_container_width=True, hide_index=True)

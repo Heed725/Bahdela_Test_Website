@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from employee_management import filter_report_users, delete_employee, prepare_transfer
+from employee_management import filter_report_users, delete_employee, prepare_transfer, delete_employees
 from hikvision import HikvisionError
 from roster_store import RosterStore
 
@@ -74,3 +74,23 @@ class ReportRosterTests(unittest.TestCase):
         self.store.save('HR', 'add', '101', 'Report Person', destination='A', department='Shop')
         self.store.apply(self.sites)
         self.assertEqual(filter_report_users([self.person], 'A', self.sites)[0]['job'], 'SHOP')
+
+    def test_bulk_delete_reports_partial_failure_and_preserves_failed_employee(self):
+        second = {'name': 'Second Person', 'employeeNo': '102'}
+        self.sites['A']['employees']['Shop']['members'].append(second['name'])
+        self.sites['A']['employees']['Shop']['member_ids'][second['name']] = second['employeeNo']
+        client = MagicMock()
+        client.get_user.side_effect = lambda employee_id: {'101': self.person, '102': second}[employee_id]
+        client.delete_user.side_effect = lambda employee_id: None if employee_id == '101' else (_ for _ in ()).throw(HikvisionError('Device rejected deletion'))
+        results = delete_employees(self.state, client, self.store, [self.person, second], 'A', self.sites)
+        self.assertEqual([u['employeeNo'] for u in results['deleted']], ['101'])
+        self.assertEqual(results['failed'][0]['employee']['employeeNo'], '102')
+        self.store.apply(self.sites)
+        self.assertEqual(self.sites['A']['employees']['Shop']['members'], ['Second Person'])
+        self.assertEqual(len(self.store.history()), 1)
+
+    def test_bulk_delete_empty_selection_never_contacts_device(self):
+        client = MagicMock()
+        self.assertEqual(delete_employees(self.state, client, self.store, [], 'A', self.sites), {'deleted': [], 'failed': []})
+        client.get_user.assert_not_called()
+        client.delete_user.assert_not_called()
