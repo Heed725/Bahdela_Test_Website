@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from admin_auth import DEFAULT_ACCOUNTS, login, logout, active_account, require_permission, password_hash
-from employee_management import add_employee, delete_employee, prepare_transfer, finish_transfer
+from employee_management import add_employee, delete_employee, prepare_transfer, finish_transfer, filter_report_users
 from hikvision import HikvisionClient, HikvisionError, ApiResult
 from roster_store import RosterStore
 
@@ -48,6 +48,7 @@ class OperationsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.store = RosterStore(Path(self.temp.name) / 'roster.db')
         self.state = {'management_account': 'HR', 'management_last_seen': time.time()}
+        self.sites = {n: {'employees': {'Shop': {'members': ['Test Person'] if n == 'A' else []}}, 'dept_order': ['Shop']} for n in ['A', 'B']}
         self.source = MagicMock(base_url='http://source')
         self.target = MagicMock(base_url='http://target')
         self.source.get_user.return_value = dict(EMPLOYEE)
@@ -56,8 +57,8 @@ class OperationsTests(unittest.TestCase):
 
     def test_all_mutations_require_login(self):
         for operation, args in [(add_employee, (self.source, self.store, {}, 'A', 'Shop')),
-                                (delete_employee, (self.source, self.store, EMPLOYEE, 'A')),
-                                (prepare_transfer, (self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop'))]:
+                                (delete_employee, (self.source, self.store, EMPLOYEE, 'A', self.sites)),
+                                (prepare_transfer, (self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', self.sites))]:
             with self.assertRaises(PermissionError):
                 operation({}, *args)
         self.source.delete_user.assert_not_called()
@@ -66,36 +67,36 @@ class OperationsTests(unittest.TestCase):
     def test_delete_stale_identity_is_rejected(self):
         self.source.get_user.return_value = {**EMPLOYEE, 'name': 'Other Person'}
         with self.assertRaises(HikvisionError):
-            delete_employee(self.state, self.source, self.store, EMPLOYEE, 'A')
+            delete_employee(self.state, self.source, self.store, EMPLOYEE, 'A', sites=self.sites)
         self.source.delete_user.assert_not_called()
 
     def test_delete_device_failure_does_not_change_roster(self):
         self.source.delete_user.side_effect = HikvisionError('Rejected')
         with self.assertRaises(HikvisionError):
-            delete_employee(self.state, self.source, self.store, EMPLOYEE, 'A')
+            delete_employee(self.state, self.source, self.store, EMPLOYEE, 'A', sites=self.sites)
         self.assertEqual(self.store.history(), [])
 
     def test_duplicate_destination_never_deletes_source(self):
         self.target.get_user.side_effect = None
         self.target.get_user.return_value = dict(EMPLOYEE)
         with self.assertRaises(HikvisionError):
-            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop')
+            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', sites=self.sites)
         self.source.delete_user.assert_not_called()
         self.target._request.assert_not_called()
 
     def test_failed_destination_never_deletes_source(self):
         self.target._request.return_value = ApiResult(False, 400, {'statusCode': 4})
         with self.assertRaises(HikvisionError):
-            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop')
+            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', sites=self.sites)
         self.source.delete_user.assert_not_called()
         self.assertEqual(self.store.history(), [])
 
     def test_transfer_in_two_steps_and_roster_persists(self):
-        pending = prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop')
+        pending = prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', sites=self.sites)
         self.source.delete_user.assert_not_called()
         self.target.get_user.side_effect = None
         self.target.get_user.return_value = dict(EMPLOYEE)
-        finish_transfer(self.state, self.source, self.target, self.store, pending)
+        finish_transfer(self.state, self.source, self.target, self.store, pending, sites=self.sites)
         self.source.delete_user.assert_called_once_with('123')
         sites = {n: {'employees': {'Shop': {'members': ['Test Person'] if n == 'A' else []}}, 'dept_order': ['Shop']} for n in ['A', 'B']}
         RosterStore(self.store.path).apply(sites)
@@ -108,13 +109,13 @@ class OperationsTests(unittest.TestCase):
         self.target.get_user.side_effect = None
         self.target.get_user.return_value = None
         with self.assertRaises(HikvisionError):
-            finish_transfer(self.state, self.source, self.target, self.store, pending)
+            finish_transfer(self.state, self.source, self.target, self.store, pending, sites=self.sites)
         self.source.delete_user.assert_not_called()
 
     def test_same_terminal_rejected(self):
         self.target.base_url = self.source.base_url
         with self.assertRaises(HikvisionError):
-            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop')
+            prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', sites=self.sites)
 
 
 class ClientTests(unittest.TestCase):

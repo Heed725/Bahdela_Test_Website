@@ -848,6 +848,16 @@ def get_configured_employee_id(dept_key, name):
             return str(employee_id)
     return "-"
 
+def get_configured_employee_job(dept_key, name):
+    """Use an assigned job title, retaining existing report roles by default."""
+    department = ALL_EMPLOYEES.get(dept_key, {})
+    wanted = ' '.join(str(name).split()).casefold()
+    for member, job in department.get('member_jobs', {}).items():
+        if ' '.join(str(member).split()).casefold() == wanted:
+            return job
+    return department.get('label', dept_key or '')
+
+
 def to_min(t):
     if not t or t=="-": return None
     try: h,m=t.split(":"); return int(h)*60+int(m)
@@ -1134,7 +1144,7 @@ def parse_by_day(events, report_start=None, report_end=None):
                         and department_key == MOBILE_MANAGER_HOME_DEPT
                         else "Manager"
                         if same_employee_name(employee_name, MOBILE_MANAGER_NAME)
-                        else ALL_EMPLOYEES.get(department_key, {}).get("label", department_key or "")
+                        else get_configured_employee_job(department_key, employee_name)
                     ),
                     "visit_status": (
                         "Home - Buguruni"
@@ -2132,7 +2142,7 @@ if st.button("View / Generate Reports"):
                             "Status": "Absent",
                             "Employee Name": absent_name,
                             "ID": get_configured_employee_id(dk, absent_name),
-                            "Role": department["label"],
+                            "Role": get_configured_employee_job(dk, absent_name),
                             "Visit Status": "Assigned",
                             "Check In": "",
                             "Check Out": "",
