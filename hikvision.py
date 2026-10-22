@@ -67,7 +67,7 @@ class HikvisionClient:
         self.session.auth = HTTPDigestAuth(username, password)
         self.session.headers.update({"Accept": "application/json"})
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> ApiResult:
+    def _send(self, method: str, path: str, **kwargs: Any) -> Response:
         try:
             response = self.session.request(
                 method,
@@ -81,6 +81,10 @@ class HikvisionClient:
         except requests.RequestException as exc:
             raise HikvisionError(f"Could not connect to the Hikvision terminal: {exc}") from exc
 
+        return response
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> ApiResult:
+        response = self._send(method, path, **kwargs)
         payload = self._json(response)
         ok = response.ok and self._is_success(payload)
         return ApiResult(ok=ok, status_code=response.status_code, payload=payload, text=response.text)
@@ -189,6 +193,7 @@ class HikvisionClient:
             "FingerPrintCfg": {
                 "employeeNo": employee_no,
                 "fingerPrintID": finger_no,
+                "enableCardReader": [1],
                 "fingerType": "normalFP",
                 "fingerData": finger_data,
             }
