@@ -93,6 +93,8 @@ class OperationsTests(unittest.TestCase):
 
     def test_transfer_in_two_steps_and_roster_persists(self):
         pending = prepare_transfer(self.state, self.source, self.target, self.store, EMPLOYEE, 'A', 'B', 'Shop', sites=self.sites)
+        self.target._request.assert_called_once_with(
+            'POST', '/ISAPI/AccessControl/UserInfo/Record?format=json', json={'UserInfo': EMPLOYEE})
         self.source.delete_user.assert_not_called()
         self.target.get_user.side_effect = None
         self.target.get_user.return_value = dict(EMPLOYEE)

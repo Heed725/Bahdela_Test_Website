@@ -33,10 +33,13 @@ class CapturedFingerprint:
 def response_message(result: ApiResult) -> str:
     payload = result.payload or {}
     status = payload.get("ResponseStatus", payload)
+    details = []
     for key in ("statusString", "subStatusCode", "errorMsg", "message"):
         value = status.get(key) if isinstance(status, dict) else None
-        if value:
-            return str(value)
+        if value and str(value) not in details:
+            details.append(str(value))
+    if details:
+        return ": ".join(details)
     return result.text.strip() or f"Hikvision returned HTTP {result.status_code}."
 
 
@@ -124,7 +127,7 @@ class HikvisionClient:
         exists = self.user_exists(record["employee_no"])
         body = self.user_payload(record)
         endpoint = "/ISAPI/AccessControl/UserInfo/Modify?format=json" if exists else "/ISAPI/AccessControl/UserInfo/Record?format=json"
-        result = self._request("PUT", endpoint, json=body)
+        result = self._request("PUT" if exists else "POST", endpoint, json=body)
         return result, "updated" if exists else "created"
 
     @staticmethod
@@ -236,7 +239,7 @@ class HikvisionClient:
         # Add must never overwrite a terminal's existing employee ID.
         if self.get_user(record["employee_no"]):
             raise HikvisionError("This employee ID already exists at the selected location.")
-        result = self._request("PUT", "/ISAPI/AccessControl/UserInfo/Record?format=json",
+        result = self._request("POST", "/ISAPI/AccessControl/UserInfo/Record?format=json",
                                json=self.user_payload(record))
         if not result.ok:
             raise HikvisionError("Employee was not saved: " + response_message(result))

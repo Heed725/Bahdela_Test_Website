@@ -89,7 +89,7 @@ def prepare_transfer(state, source_client, target_client, store, employee, sourc
         raise HikvisionError('That employee ID already exists at the destination. No records were changed.')
     allowed = ('employeeNo', 'name', 'userType', 'gender', 'Valid', 'doorRight', 'RightPlan')
     user = {key: live[key] for key in allowed if key in live}
-    result = target_client._request('PUT', '/ISAPI/AccessControl/UserInfo/Record?format=json', json={'UserInfo': user})
+    result = target_client._request('POST', '/ISAPI/AccessControl/UserInfo/Record?format=json', json={'UserInfo': user})
     if not result.ok:
         raise HikvisionError('Destination employee was not created: ' + response_message(result))
     verify_identity(target_client, employee)
