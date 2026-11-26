@@ -41,6 +41,8 @@ def checked(result, action):
         status = result.payload.get('ResponseStatus', result.payload)
         safe = {key: status[key] for key in ('statusString', 'subStatusCode')
                 if isinstance(status, dict) and key in status}
+        if 'FingerPrintStatus' in result.payload:
+            safe['FingerPrintStatus'] = result.payload['FingerPrintStatus']
         reason = response_message(ApiResult(False, result.status_code, safe))
         raise HikvisionError(f'{action}: {reason} Source employee remains active.')
     return result.payload
@@ -175,7 +177,7 @@ def read_face(client, employee_no):
         path = location.path + ('?' + location.query if location.query else '')
         download = client._send('GET', path, allow_redirects=False)
         if download.status_code != 200:
-            raise HikvisionError('Could not download the enrolled face photograph. Source employee remains active.')
+            raise HikvisionError(f'Could not download the enrolled face photograph (HTTP {download.status_code}). Source employee remains active.')
         image = download.content
     else:
         raise HikvisionError('The terminal did not export the enrolled face photograph. Source employee remains active.')
@@ -189,7 +191,7 @@ def read_face(client, employee_no):
     return image
 
 
-def export_credentials(client, user, needed=None):
+def export_credentials(client, user, needed=None, include_face=True):
     employee_no = str(user['employeeNo'])
     bundle = Credentials()
     for kind, count_key, reader in (
@@ -197,6 +199,8 @@ def export_credentials(client, user, needed=None):
         ('fingerprints', 'numOfFP', lambda: read_fingerprints(client, employee_no)),
         ('faces', 'numOfFace', lambda: read_face(client, employee_no)),
     ):
+        if kind == 'faces' and not include_face:
+            continue
         expected = int(user[count_key]) if count_key in user else None
         if needed is not None and not needed[kind]:
             continue
@@ -253,8 +257,6 @@ def copy_credentials(client, user, bundle):
                 str(item.get('cardReaderRecvStatus')) != '1' for item in statuses):
             raise HikvisionError('The destination reader rejected a fingerprint. Source employee remains active.')
     if bundle.face:
-        metadata = {'faceLibType': 'blackFD', 'FDID': '1', 'FPID': employee_no,
-                    'name': user['name'], 'saveFacePic': True}
         # Retrying a partial transfer may already have copied the face.
         existing_face = read_face(client, employee_no)
         method, path = 'POST', '/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json'
@@ -263,13 +265,12 @@ def copy_credentials(client, user, bundle):
             method = 'PUT'
             path = '/ISAPI/Intelligent/FDLib/FDSearch?' + urlencode(
                 {'format': 'json', 'FDID': '1', 'FPID': employee_no, 'faceLibType': 'blackFD'})
-        checked(client._request(method, path, files={
-            'FaceDataRecord': (None, json.dumps(metadata), 'application/json'),
-            'FaceImage': ('face.jpg', bundle.face, 'image/jpeg')}), 'Could not copy the face photograph')
+        checked(client.upload_face(employee_no, bundle.face, name=user['name'], method=method, path=path),
+                'Could not copy the face photograph')
 
 
-def verify_credentials(client, user, expected):
-    actual = export_credentials(client, user, needed=expected.counts())
+def verify_credentials(client, user, expected, complete=False, include_face=True):
+    actual = export_credentials(client, user, needed=None if complete else expected.counts(), include_face=include_face)
     source, destination = expected.manifest(), actual.manifest()
     if source['cards'] != destination['cards'] or source['fingerprints'] != destination['fingerprints']:
         raise HikvisionError('Destination cards or fingerprints could not be verified. Source employee remains active.')

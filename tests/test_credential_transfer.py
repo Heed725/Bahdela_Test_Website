@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
 from unittest.mock import MagicMock, patch
+from email import policy
+from email.parser import BytesParser
 
 from PIL import Image
 import requests
@@ -15,11 +17,12 @@ from credential_transfer import export_credentials, read_face, search_cards
 from employee_management import prepare_transfer, retry_transfer_credentials, finish_transfer
 from hikvision import HikvisionClient, HikvisionError
 from roster_store import RosterStore
+from biometric_protocol import prepare_face_jpeg
 
 
 def jpeg(color='red'):
     stream = io.BytesIO()
-    Image.new('RGB', (16, 16), color).save(stream, 'JPEG')
+    Image.new('RGB', (128, 128), color).save(stream, 'JPEG')
     return stream.getvalue()
 
 
@@ -117,10 +120,13 @@ class MemoryTerminal:
             return self.response({'FingerPrintStatus': {'StatusList': [{'id': 1, 'cardReaderRecvStatus': '1'}]}})
         if ((path.endswith('/FaceDataRecord') and method == 'POST') or
                 (path.endswith('/FDSearch') and method == 'PUT')):
-            files = kwargs['files']
-            metadata = json.loads(files['FaceDataRecord'][1])
+            message = BytesParser(policy=policy.default).parsebytes(
+                ('Content-Type: ' + kwargs['headers']['Content-Type'] + '\r\n\r\n').encode() + kwargs['data'])
+            fields = {part.get_param('name', header='content-disposition'): part.get_payload(decode=True)
+                      for part in message.iter_parts()}
+            metadata = json.loads(fields['FaceDataRecord'])
             if not self.drop_face:
-                self.faces[metadata['FPID']] = files['FaceImage'][1]
+                self.faces[metadata['FPID']] = fields['FaceImage']
             return self.response(ok)
         if path.endswith('/FDSearch') and method == 'POST':
             employee_no = body['FPID']
@@ -176,12 +182,109 @@ class CredentialTransferTests(unittest.TestCase):
                              for number in ('001234', '005678')]
         self.source.faces['201'] = jpeg()
 
-    def prepare(self):
+    def prepare(self, **kwargs):
         return prepare_transfer(self.state, self.source.client, self.target.client, self.store,
-                                self.employee, 'A', 'B', 'Shop', sites=self.sites, job='CASHIER')
+                                self.employee, 'A', 'B', 'Shop', sites=self.sites, job='CASHIER', **kwargs)
 
     def finish(self, pending):
         finish_transfer(self.state, self.source.client, self.target.client, self.store, pending, sites=self.sites)
+
+    def existing_copy(self):
+        for key in ('users', 'cards', 'fingers', 'faces'):
+            setattr(self.target, key, copy.deepcopy(getattr(self.source, key)))
+
+    def assert_no_destination_writes(self):
+        writes = [path for method, path in self.target.calls
+                  if path.endswith(('/Record', '/SetUp', '/Delete')) or method == 'PUT']
+        self.assertEqual(writes, [])
+
+    def test_existing_account_still_rejected_without_explicit_reconciliation(self):
+        self.existing_copy()
+        with self.assertRaisesRegex(HikvisionError, 'already exists'):
+            self.prepare()
+        self.assert_no_destination_writes()
+        self.assertNotIn('management_transfer', self.state)
+
+    def test_matching_existing_account_verified_without_overwriting_then_transfer_finishes(self):
+        self.existing_copy()
+        pending = self.prepare(reconcile_existing=True)
+        self.assertTrue(pending['existing_destination'])
+        self.assertTrue(pending['credentials_verified'])
+        self.assertEqual(pending['credential_counts'], {'cards': 2, 'fingerprints': 2, 'faces': 1})
+        self.assert_no_destination_writes()
+        self.finish(pending)
+        self.assertNotIn('201', self.source.users)
+        self.assertIn('201', self.target.users)
+        self.assert_no_destination_writes()
+
+    def test_existing_id_for_other_person_cannot_be_reconciled(self):
+        self.existing_copy()
+        self.target.users['201']['name'] = 'Other Person'
+        with self.assertRaisesRegex(HikvisionError, 'different person'):
+            self.prepare(reconcile_existing=True)
+        self.assert_no_destination_writes()
+        self.assertEqual(self.store.history(), [])
+
+    def test_existing_different_credentials_block_reconciliation_without_overwriting(self):
+        self.existing_copy()
+        self.target.fingers['201'][0]['fingerData'] = 'destination-template'
+        with self.assertRaisesRegex(HikvisionError, 'could not be verified'):
+            self.prepare(reconcile_existing=True)
+        self.assertEqual(self.target.fingers['201'][0]['fingerData'], 'destination-template')
+        self.assertIn('201', self.source.users)
+        self.assertNotIn('management_transfer', self.state)
+        self.assert_no_destination_writes()
+        self.assertEqual(self.store.history(), [])
+
+    def test_existing_extra_credentials_cannot_be_skipped_when_source_has_none(self):
+        original = {key: copy.deepcopy(getattr(self.source, key)) for key in ('cards', 'fingers', 'faces')}
+        for kind in ('cards', 'fingers', 'faces'):
+            with self.subTest(kind=kind):
+                for key, value in original.items():
+                    setattr(self.source, key, copy.deepcopy(value))
+                self.existing_copy()
+                self.source.cards = []
+                self.source.fingers = {}
+                self.source.faces = {}
+                # Retain just one credential category at the destination.
+                for other in ('cards', 'fingers', 'faces'):
+                    if other != kind:
+                        setattr(self.target, other, [] if other == 'cards' else {})
+                with self.assertRaisesRegex(HikvisionError, 'could not be verified'):
+                    self.prepare(reconcile_existing=True)
+                self.assertNotIn('management_transfer', self.state)
+                self.assertIn('201', self.source.users)
+                self.assert_no_destination_writes()
+
+    def test_existing_different_access_settings_block_source_removal(self):
+        self.existing_copy()
+        self.target.users['201']['Valid'] = {'enable': False}
+        with self.assertRaisesRegex(HikvisionError, 'access settings differ'):
+            self.prepare(reconcile_existing=True)
+        self.assertIn('201', self.source.users)
+        self.assert_no_destination_writes()
+        self.assertEqual(self.store.history(), [])
+
+    def test_reconciliation_retry_never_overwrites_changed_destination_credentials(self):
+        self.existing_copy()
+        pending = self.prepare(reconcile_existing=True)
+        self.target.fingers['201'][0]['fingerData'] = 'changed-after-verification'
+        with self.assertRaisesRegex(HikvisionError, 'could not be verified'):
+            retry_transfer_credentials(self.state, self.source.client, self.target.client, self.store, pending, sites=self.sites)
+        self.assertFalse(pending['credentials_verified'])
+        self.assert_no_destination_writes()
+        with self.assertRaisesRegex(HikvisionError, 'Copy and verify'):
+            self.finish(pending)
+        self.assertIn('201', self.source.users)
+
+    def test_existing_access_settings_checked_again_before_source_deletion(self):
+        self.existing_copy()
+        pending = self.prepare(reconcile_existing=True)
+        self.target.users['201']['doorRight'] = '2'
+        with self.assertRaisesRegex(HikvisionError, 'access settings differ'):
+            self.finish(pending)
+        self.assertIn('201', self.source.users)
+        self.assert_no_destination_writes()
 
     def test_full_transfer_preserves_all_credentials_and_history(self):
         self.source.page_size = 1
@@ -191,7 +294,7 @@ class CredentialTransferTests(unittest.TestCase):
         self.assertEqual(pending['credential_counts'], {'cards': 2, 'fingerprints': 2, 'faces': 1})
         self.assertEqual(self.target.fingers, self.source.fingers)
         self.assertEqual(self.target.cards, self.source.cards)
-        self.assertEqual(self.target.faces, self.source.faces)
+        self.assertEqual(self.target.faces['201'], prepare_face_jpeg(self.source.faces['201']))
         session_text = json.dumps(self.state)
         db_text = json.dumps(self.store.history())
         for secret in ('template-one', 'template-seven', '001234', '005678'):
@@ -205,6 +308,37 @@ class CredentialTransferTests(unittest.TestCase):
         self.assertEqual(self.sites['A']['employees']['Shop']['members'], [])
         self.assertEqual(self.sites['B']['employees']['Shop']['member_jobs']['Test Person'], 'CASHIER')
 
+    def test_explicit_photo_exclusion_copies_all_cards_and_fingers_without_reading_face(self):
+        self.source.fail_path = '/ISAPI/Intelligent/FDLib/FDSearch'
+        pending = self.prepare(include_face=False)
+        self.assertEqual(pending['credential_counts'], {'cards': 2, 'fingerprints': 2, 'faces': 0})
+        self.assertFalse(pending['include_face'])
+        self.assertEqual(self.target.fingers, self.source.fingers)
+        self.assertEqual(self.target.cards, self.source.cards)
+        retry_transfer_credentials(self.state, self.source.client, self.target.client, self.store, pending, sites=self.sites)
+        self.finish(pending)
+        self.assertNotIn('201', self.source.users)
+        self.assertFalse(self.target.faces)
+        self.assertFalse(any('/FDLib/' in path for terminal in (self.source, self.target) for _, path in terminal.calls))
+
+    def test_explicit_photo_exclusion_preserves_existing_destination_photo(self):
+        self.existing_copy()
+        self.target.faces['201'] = jpeg('blue')
+        photo = self.target.faces['201']
+        self.source.fail_path = self.target.fail_path = '/ISAPI/Intelligent/FDLib/FDSearch'
+        pending = self.prepare(include_face=False, reconcile_existing=True)
+        self.finish(pending)
+        self.assertEqual(self.target.faces['201'], photo)
+        self.assert_no_destination_writes()
+
+    def test_photo_exclusion_does_not_allow_missing_fingerprints(self):
+        self.existing_copy()
+        self.target.fingers['201'] = []
+        with self.assertRaisesRegex(HikvisionError, 'could not be verified'):
+            self.prepare(include_face=False, reconcile_existing=True)
+        self.assertIn('201', self.source.users)
+        self.assert_no_destination_writes()
+
     def test_unsupported_export_stops_before_destination_creation(self):
         self.source.fail_path = '/ISAPI/AccessControl/FingerPrintUpload'
         with self.assertRaisesRegex(HikvisionError, 'notSupport'):
@@ -212,6 +346,20 @@ class CredentialTransferTests(unittest.TestCase):
         self.assertFalse(self.target.users)
         self.assertIn('201', self.source.users)
         self.assertEqual(self.store.history(), [])
+
+    def test_credential_transfer_removes_canonical_roster_entry_for_terminal_alias(self):
+        original_fingers = copy.deepcopy(self.source.fingers['201'])
+        department = self.sites['A']['employees']['Shop']
+        department['members'] = ['Canonical Report Name']
+        department['member_aliases'] = {'Canonical Report Name': ['Test Person']}
+        department['member_ids'] = {'Canonical Report Name': '201'}
+        pending = self.prepare()
+        self.assertEqual(pending['credential_counts'], {'cards': 2, 'fingerprints': 2, 'faces': 1})
+        self.finish(pending)
+        self.store.apply(self.sites)
+        self.assertEqual(department['members'], [])
+        self.assertEqual(self.sites['B']['employees']['Shop']['members'], ['Test Person'])
+        self.assertEqual(self.target.fingers['201'], original_fingers)
 
     def test_card_owned_by_other_employee_is_never_reassigned(self):
         self.target.cards = [{'employeeNo': '999', 'cardNo': '001234', 'cardType': 'normalCard'}]
@@ -222,7 +370,7 @@ class CredentialTransferTests(unittest.TestCase):
 
     def test_partial_copy_can_retry_without_duplicate_cards_or_source_deletion(self):
         self.target.reject_finger = True
-        with self.assertRaisesRegex(HikvisionError, 'reader rejected'):
+        with self.assertRaisesRegex(HikvisionError, 'reader memory is full'):
             self.prepare()
         pending = self.state['management_transfer']
         self.assertFalse(pending['credentials_verified'])
@@ -342,7 +490,7 @@ render_management(sites, store)
             at.checkbox(key='manage_transfer_start_confirm_A').check().run()
             next(b for b in at.button if b.label == 'Prepare destination').click().run()
             self.assertFalse(at.exception)
-            self.assertTrue(any('reader rejected' in error.value for error in at.error))
+            self.assertTrue(any('reader memory is full' in error.value for error in at.error))
             at.run()
             self.assertTrue(next(b for b in at.button if b.label == 'Finish transfer').disabled)
             self.assertTrue(at.checkbox(key='manage_transfer_confirm').disabled)

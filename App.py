@@ -1,18 +1,26 @@
 """
 Multi-Site Daily Shift Report — Streamlit App
 Supports: Buguruni, Puma Upanga, Puma Ocean Road, Puma Survey, India, Kibaha, Livingstone
-Run with:  python app.py   OR   streamlit run app.py
+Run with:  python App.py   OR   streamlit run App.py
 """
 
 import streamlit as st
-from employee_management import roster_store, render_login, render_management
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+from biometric_protocol import ENROLLMENT_RELEASE
+from employee_management import roster_store, render_login, render_management, report_site_for, client_for
+from hikvision import HikvisionError
+from report_roster import current_report_events
+from lunch_reports import render_lunch_report
+from attendance_reports import REPORT_TYPES, REPORT_NOTES, subset_tables, render_subset_report
+from all_station_reports import ALL_STATIONS, render_all_stations
 import requests
 import pandas as pd
 from requests.auth import HTTPDigestAuth
 import urllib3
-import io, sys, subprocess, os, re
+import io, sys, subprocess, os, re, sqlite3
 from datetime import date, timedelta, datetime, timezone
 from collections import defaultdict
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from docx import Document
@@ -74,12 +82,12 @@ def local_now():
 # ── AUTO-LAUNCH ────────────────────────────────────────────────
 # Only relaunch if we were NOT already started by streamlit.
 # The sentinel env var _APP_LAUNCHED prevents recursive relaunching.
-if os.environ.get("_APP_LAUNCHED") != "1":
+if get_script_run_ctx(suppress_warning=True) is None and os.environ.get("_APP_LAUNCHED") != "1":
     os.environ["_APP_LAUNCHED"] = "1"
     script = os.path.abspath(__file__)
     env = {**os.environ, "_APP_LAUNCHED": "1"}
     sys.exit(subprocess.call(
-        ["streamlit", "run", script, "--server.headless", "false"],
+        [sys.executable, "-m", "streamlit", "run", script, "--server.headless", "true"],
         shell=(sys.platform == "win32"), env=env))
 
 # ── PAGE CONFIG ───────────────────────────────────────────────
@@ -93,185 +101,7 @@ if favicon_path:
 
 st.set_page_config(**page_config)
 
-# ── LIGHT-ONLY RESPONSIVE THEME ──────────────────────────────
-BG      = "#FFFFFF"
-SIDEBAR = "#F3EDE3"
-CARD_BG = "#FFF9F2"
-H1_COL  = "#5A0000"
-H2_COL  = "#8B4500"
-TXT     = "#2D2D2D"
-MUTED   = "#6F6F6F"
-INP_BG  = "#FFFFFF"
-DL_BG   = "#FFFFFF"
-
-st.markdown(f"""
-<style>
-  :root {{ color-scheme: light only; }}
-  html, body, [class*="css"] {{ font-family:Arial,sans-serif; }}
-  .stApp {{ background-color:{BG}; color:{TXT}; }}
-  .block-container {{ max-width:1500px; padding-top:1.25rem; padding-bottom:2rem; }}
-  [data-testid="stSidebar"] {{ background-color:{SIDEBAR}; border-right:1px solid #E3D8C8; }}
-
-  h1,h2,h3,h4 {{ font-family:Arial,sans-serif; }}
-  h1 {{ color:{H1_COL} !important; }}
-  h2,h3,h4 {{ color:{H2_COL} !important; }}
-  p,label,div,span {{ color:{TXT}; font-family:Arial,sans-serif; }}
-
-  [data-testid="stMetric"] {{
-    background:{CARD_BG}; border:1px solid #D8C4A7;
-    border-radius:10px; padding:12px 16px;
-  }}
-  [data-testid="stMetricLabel"] {{ color:{H2_COL} !important; font-size:13px; }}
-  [data-testid="stMetricValue"] {{ color:{H1_COL} !important; font-size:24px; font-weight:bold; }}
-
-  /* Keep every normal button readable. */
-  .stButton > button {{
-    background-color:#8B0000 !important; color:#FFFFFF !important;
-    border:1px solid #8B0000 !important; border-radius:7px;
-    font-weight:bold; font-size:14px; padding:8px 18px;
-    min-height:42px; width:100%;
-  }}
-  .stButton > button p,
-  .stButton > button span,
-  .stButton > button div {{ color:#FFFFFF !important; }}
-  .stButton > button:hover {{
-    background-color:#C0392B !important; border-color:#C0392B !important;
-    color:#FFFFFF !important;
-  }}
-
-  /* Download buttons stay white with dark visible text. */
-  .stDownloadButton > button {{
-    background-color:#FFFFFF !important; color:#8B0000 !important;
-    border:2px solid #8B0000 !important; border-radius:8px;
-    font-size:14px; font-weight:800; padding:9px 14px;
-    min-height:46px; width:100%;
-    box-shadow:0 2px 6px rgba(90,0,0,.08);
-  }}
-  .stDownloadButton > button p,
-  .stDownloadButton > button span,
-  .stDownloadButton > button div {{ color:#8B0000 !important; }}
-  .stDownloadButton > button:hover {{
-    background-color:#FFF3CD !important; color:#5A0000 !important;
-  }}
-
-  input {{ background-color:{INP_BG} !important; color:{TXT} !important; }}
-  [data-baseweb="select"] > div {{ background:#FFFFFF !important; color:{TXT} !important; }}
-  hr {{ border-color:#D8C4A7 !important; }}
-  .stProgress > div > div {{ background-color:#8B0000 !important; }}
-  /* Make report choices look like clear, high-contrast buttons. */
-  .stTabs [data-baseweb="tab-list"] {{
-    display:flex !important;
-    flex-wrap:wrap !important;
-    gap:10px !important;
-    overflow-x:visible !important;
-    padding:4px 0 10px 0 !important;
-  }}
-  .stTabs [data-baseweb="tab"] {{
-    flex:1 1 210px !important;
-    justify-content:center !important;
-    min-height:48px !important;
-    padding:10px 16px !important;
-    background:#FFFFFF !important;
-    border:2px solid #8B0000 !important;
-    border-radius:9px !important;
-    color:#8B0000 !important;
-    font-weight:800 !important;
-    white-space:nowrap !important;
-    box-shadow:0 2px 6px rgba(90,0,0,.08);
-  }}
-  .stTabs [data-baseweb="tab"] p,
-  .stTabs [data-baseweb="tab"] span,
-  .stTabs [data-baseweb="tab"] div {{
-    color:#8B0000 !important;
-    font-weight:800 !important;
-  }}
-  .stTabs [data-baseweb="tab"]:hover {{
-    background:#FFF7F2 !important;
-    border-color:#C0392B !important;
-  }}
-  .stTabs [data-baseweb="tab"][aria-selected="true"] {{
-    background:#8B0000 !important;
-    border-color:#8B0000 !important;
-    color:#FFFFFF !important;
-    box-shadow:0 3px 9px rgba(90,0,0,.18);
-  }}
-  .stTabs [data-baseweb="tab"][aria-selected="true"] p,
-  .stTabs [data-baseweb="tab"][aria-selected="true"] span,
-  .stTabs [data-baseweb="tab"][aria-selected="true"] div {{
-    color:#FFFFFF !important;
-  }}
-  .stTabs [data-baseweb="tab-highlight"] {{ display:none !important; }}
-
-  /* Site choices replace the old separate Switch buttons. */
-  div[data-testid="stRadio"] [role="radiogroup"] {{
-    display:flex !important; flex-wrap:wrap !important;
-    gap:8px !important; align-items:stretch !important;
-  }}
-  div[data-testid="stRadio"] [role="radiogroup"] > label {{
-    flex:1 1 145px !important; min-width:130px !important;
-    margin:0 !important; padding:11px 12px !important;
-    background:#FFFFFF !important; border:1px solid #D9CEC0 !important;
-    border-radius:9px !important; justify-content:center !important;
-    text-align:center !important; cursor:pointer !important;
-  }}
-  div[data-testid="stRadio"] [role="radiogroup"] > label:hover {{
-    border-color:#8B0000 !important; background:#FFF9F2 !important;
-  }}
-  div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {{
-    background:#8B0000 !important; border-color:#D4A017 !important;
-    box-shadow:0 2px 8px rgba(139,0,0,.14);
-  }}
-  div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) p,
-  div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) span,
-  div[data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) div {{
-    color:#FFFFFF !important; font-weight:bold !important;
-  }}
-  div[data-testid="stRadio"] [role="radiogroup"] > label > div:first-child {{ display:none !important; }}
-  div[data-testid="stRadio"] [role="radiogroup"] p {{
-    width:100%; text-align:center; margin:0; font-weight:700;
-  }}
-
-  .department-grid {{
-    display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr));
-    gap:10px; margin-top:8px;
-  }}
-  .department-card {{
-    padding:10px 8px; border-radius:7px; text-align:center;
-    min-height:86px; display:flex; flex-direction:column;
-    justify-content:center;
-  }}
-
-  @media (max-width: 768px) {{
-    .stTabs [data-baseweb="tab"] {{
-      flex:1 1 100% !important;
-      min-height:50px !important;
-      font-size:14px !important;
-    }}
-    .stDownloadButton > button {{
-      min-height:48px !important;
-      font-size:14px !important;
-    }}
-    .block-container {{ padding:0.8rem 0.7rem 1.7rem 0.7rem; }}
-    h1 {{ font-size:1.65rem !important; line-height:1.2 !important; }}
-    [data-testid="column"] {{ min-width:0 !important; }}
-    [data-testid="stMetric"] {{ padding:10px 11px; }}
-    [data-testid="stMetricValue"] {{ font-size:20px !important; }}
-    div[data-testid="stRadio"] [role="radiogroup"] > label {{
-      flex:1 1 calc(50% - 8px) !important; min-width:125px !important;
-      padding:10px 7px !important;
-    }}
-    .department-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
-    .stButton > button, .stDownloadButton > button {{ min-height:46px; }}
-  }}
-
-  @media (max-width: 420px) {{
-    div[data-testid="stRadio"] [role="radiogroup"] > label {{
-      flex:1 1 100% !important;
-    }}
-    .department-grid {{ grid-template-columns:1fr; }}
-  }}
-</style>
-""", unsafe_allow_html=True)
+st.html(Path(APP_DIR) / "attendance.css")
 
 # ══════════════════════════════════════════════════════════════
 # ── MULTI-SITE CONFIG ─────────────────────────────────────────
@@ -363,11 +193,17 @@ SITES = {
                     "Bakari Saidi Mchingwi","Bihasanati Saidi Nzige","Daudi Rashidi Sharabile",
                     "Elibariki Geofrey Mshana","Hamadi Adinani Iddi","Hamlati Shaibu Ghindu",
                     "Jamali Sadi Kilindo","Juma Mussa Juma",
-                    "Kelvin Lukemelo Mlowe","Mnyeto Miraji Rashidi",
+                    "Kelvin Lukemelo Mlowe",
                     "Ramadhani Abdallah Ally","Hassani Muhidini Masenga",
                     "Rashidi Majau Masai","Ramadhan Mohamed Yusuph",
                     "Rajabu Ijumaa Hizza","Nesha Habib Losiri","Msabaha Ally Msabaha",
+                    "Haruna Muhamedi Haruna",
                 ],
+                "member_ids": {"Haruna Muhamedi Haruna":"1633"},
+                "member_aliases": {
+                    "Athumani Yusuph Sheby": ["Athumani Y Shebly"],
+                    "Hamlati Shaibu Ghindu": ["Hamlat S ghindu"],
+                },
             },
             "Oil Lubricant": {
                 "label":"OIL LUBRICANT",
@@ -412,6 +248,8 @@ SITES = {
                 "members":[
                     "Karim Mohamedi Radaki","Mnyeto Miraji Rashidi","Abdul Miraj Mkwizu",
                 ],
+                "member_ids": {"Mnyeto Miraji Rashidi": "1365"},
+                "member_aliases": {"Mnyeto Miraji Rashidi": ["Mnyeto M Rashid"]},
             },
             "Cleaner": {
                 "label":"CLEANER (HOUSE KEEPING)", "shift":"Shifts: 08:00-17:00 | 17:00-08:00",
@@ -443,8 +281,9 @@ SITES = {
                     "Mulla Omari Kadari","Mzee Hamis Kassim","Omari Yusufu Shebly",
                     "Said Ramadhani Mnjama","Salim Siraji Bajuni","Salmin Mdhihiri Yahaya",
                     "Salmu Omari Siraji","Thomas Constans Kereza","Zahoro Rashidi Mbotoni",
-                    "Emmanuel Kituki",
+                    "Emmanuel Kituki","Haruni Kenedy Saimoni",
                 ],
+                "member_ids": {"Haruni Kenedy Saimoni":"1652"},
             },
             "Security": {
                 "label":"SECURITY", "shift":"Shift: 09:00 - 09:00 (24 Hrs)",
@@ -497,13 +336,14 @@ SITES = {
                     "Abdul Abbas Bajuni","Waziri Hatibu Waziri","Swed Khalfan Kailo",
                     "Issa Ally Juma","Zulfa Rashid Mkamba","Yassini Siraji Athumani",
                     "Yahya Mwahimu Abdul","William Joisack Maliselo","Siraji Yassini Siraji",
-                    "Mshija Juma Lukuba","Jasmin Warid Idd",
-                    "Hassani Hashimu Mpasule","Haruni Kenedy Saimoni","Haruna Muhamedi Haruna",
+                    "Mshija Juma Lukuba",
+                    "Hassani Hashimu Mpasule",
                     "Hamisi Abdull Siraji","France John Mapunda","Fikirini Rashidi Mussa",
                     "Baraka Raymond Daa","Abuu Jafari Salehe","Abdul Amir Mwishaha",
                     "Abdallah Ally Abdallah","Khalfan Suleiman Ali",
                     "Glory Asajile Mwaipaja","Amiri Siraji Nurdini",
-                    "Albati Donasiani Kitali",
+                    "Albati Donasiani Kitali","Hatibu Omari",
+                    "Jasmin Warid Idd",
                 ],
                 "member_ids": {
                     "Khalfan Suleiman Ali":"4011",
@@ -511,6 +351,8 @@ SITES = {
                     "Amiri Siraji Nurdini":"7012",
                     "Issa Ally Juma":"7013",
                     "Albati Donasiani Kitali":"7014",
+                    "Hatibu Omari":"204",
+                    "Jasmin Warid Idd":"1653",
                 },
             },
             "Cleaning": {
@@ -518,7 +360,11 @@ SITES = {
                 "header_hex":"2E6B3E",
                 "members":[
                     "Shabani Jafari Sobo","Saumu Omary Mwalimu","Makenya Juma Makenya",
+                    "Ithinain Yusuf Mpondi",
                 ],
+                "member_ids": {
+                    "Ithinain Yusuf Mpondi":"203",
+                },
             },
             "Supervisors": {
                 "label":"SUPERVISORS / MANAGEMENT", "shift":"Shift: 08:00 - 17:00",
@@ -535,7 +381,7 @@ SITES = {
                 "label":"WAKALA", "shift":"Shift: 08:00 - 17:00",
                 "header_hex":"8B4500",
                 "members":[
-                    "Mwanaiddy Ally Ramadhani","Mohamed Kombo Mwinyikambi","Fatma Said Semfuko",
+                    "Mwanaiddy Ally Ramadhani","Fatma Said Semfuko",
                 ],
             },
         },
@@ -649,6 +495,7 @@ SITES = {
                     "Ally Malozo",
                     "Ally Hassan Ally",
                     "Abdulkarim Abdallah Kilindo",
+                    "Mohamed Kombo Mwinyikambi",
                 ],
                 "member_ids": {
                     "Idd Adnan Idd":"5018",
@@ -667,6 +514,7 @@ SITES = {
                     "Ally Malozo":"5005",
                     "Ally Hassan Ally":"5004",
                     "Abdulkarim Abdallah Kilindo":"5003",
+                    "Mohamed Kombo Mwinyikambi":"1651",
                 },
             },
             "Oil Supervisor": {
@@ -988,38 +836,30 @@ def checkin_fill(dept_key,check_in):
     if ci > 540: return "FFCCCC","CC0000"
     return "FFFFFF","333333"
 
+# Canvas-rendered cells use self-contained color pairs that work in both themes.
+ATTENDANCE_BADGES = {
+    "Early": "#20604A",
+    "Late": "#963745",
+    "Absent": "#4E5768",
+}
+CHECKIN_BADGES = {"C6EFCE": "Early", "FFCCCC": "Late"}
+
+
 def style_viewer_dataframe(dataframe, dept_key):
-    """Apply the report's attendance colours to the on-screen viewer."""
-    columns = list(dataframe.columns)
-    check_in_index = columns.index("Check In")
-
+    """Highlight attendance states while letting the grid theme paint the rows."""
     def style_row(row):
-        styles = ["" for _ in columns]
+        styles = dict.fromkeys(dataframe.columns, "")
+        if row["Status"] == "Absent":
+            styles["Status"] = f"background-color: {ATTENDANCE_BADGES['Absent']}; color: white;"
+        elif row["Check In"]:
+            fill, _ = checkin_fill(dept_key, row["Check In"])
+            badge = CHECKIN_BADGES.get(fill)
+            if badge:
+                styles["Check In"] = f"background-color: {ATTENDANCE_BADGES[badge]}; color: white;"
+        return pd.Series(styles)
 
-        # Absent staff use the same grey styling as exported reports.
-        if row.get("Status") == "Absent":
-            return [
-                "background-color: #EEEEEE; color: #999999;"
-                for _ in columns
-            ]
+    return dataframe.style.apply(style_row, axis=1)
 
-        check_in = str(row.get("Check In") or "").strip()
-        if check_in:
-            background, text_colour = checkin_fill(dept_key, check_in)
-            styles[check_in_index] = (
-                f"background-color: #{background}; "
-                f"color: #{text_colour}; font-weight: 700;"
-            )
-        return styles
-
-    return (
-        dataframe.style
-        .apply(style_row, axis=1)
-        .set_properties(**{
-            "border-color": "#D4A017",
-            "vertical-align": "middle",
-        })
-    )
 
 def hex2rgb(h):
     h=h.lstrip("#"); return tuple(int(h[i:i+2],16) for i in (0,2,4))
@@ -1862,13 +1702,55 @@ def build_xlsx_summary(summary,total_days,start_date,end_date,label,site="Buguru
 # ── STREAMLIT UI ─────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════
 
+def all_station_tables(active, mode):
+    """Apply each station's own roster and shifts before combining report rows."""
+    global ALL_EMPLOYEES, DEPT_ORDER, DEPT_COLORS
+    original = ALL_EMPLOYEES, DEPT_ORDER, DEPT_COLORS
+    manager_events = [event for name, data in active.items()
+                      for event in tag_events_with_site(data['events'], name)
+                      if is_mobile_manager_event(event)]
+    result = {}
+    try:
+        for name, data in active.items():
+            roster = data['roster']
+            ALL_EMPLOYEES, DEPT_COLORS = roster['employees'], roster['dept_colors']
+            DEPT_ORDER = [key for key in roster['dept_order'] if not ALL_EMPLOYEES[key].get('visitor_only')]
+            events = [event for event in tag_events_with_site(data['events'], name)
+                      if not is_mobile_manager_event(event)] + manager_events
+            events = current_report_events(events, roster, MOBILE_MANAGER_NAME)
+            rows = [row for row in parse_by_day(events, start_date, end_date)
+                    if not same_employee_name(row.get('name'), MOBILE_MANAGER_NAME)
+                    or name in row.get('visited_sites', [])]
+            if any(same_employee_name(row['name'], MOBILE_MANAGER_NAME) for row in rows):
+                manager_department = (MOBILE_MANAGER_HOME_DEPT if name == MOBILE_MANAGER_HOME_SITE
+                                      else MOBILE_MANAGER_KIBAHA_DEPT if name == MOBILE_MANAGER_KIBAHA_SITE
+                                      else MOBILE_MANAGER_VISITOR_DEPT)
+                if manager_department not in DEPT_ORDER:
+                    DEPT_ORDER.append(manager_department)
+            rows_by_day = defaultdict(list)
+            for row in rows:
+                rows_by_day[row['date']].append(row)
+            days, day = [], start_date
+            while day <= end_date:
+                days.append((day, build_dept_data(rows_by_day.get(day.isoformat(), []))))
+                day += timedelta(days=1)
+            result[name] = subset_tables(days, ALL_EMPLOYEES, mode,
+                lambda department, arrival: get_shift_window(department, arrival)[0],
+                get_configured_employee_id)
+    finally:
+        ALL_EMPLOYEES, DEPT_ORDER, DEPT_COLORS = original
+    return result
+
+
 # ── Persist selected site across reruns ───────────────────────
-site_names = list(SITES.keys())
+site_names = [*SITES, ALL_STATIONS]
 if "selected_site" not in st.session_state:
     st.session_state.selected_site = site_names[0]
 
 # Resolve the currently active site before drawing the header.
-site_cfg = SITES[st.session_state.selected_site]
+site_cfg = (SITES[st.session_state.selected_site] if st.session_state.selected_site != ALL_STATIONS
+            else {'label': ALL_STATIONS, 'employees': {}, 'dept_order': [], 'dept_colors': {},
+                  'device_ip': '', 'username': '', 'password': ''})
 ALL_EMPLOYEES = site_cfg["employees"]
 DEPT_ORDER = [
     department
@@ -1890,11 +1772,9 @@ with header_title:
 with header_login:
     render_login()
 
-st.markdown(
-    f"<p style='color:{MUTED};margin-top:-10px'>Daily attendance reports — "
-    f"<b>{site_cfg['label']}</b> access control device.</p>",
-    unsafe_allow_html=True,
-)
+site_description = ("available stations only" if st.session_state.selected_site == ALL_STATIONS
+                    else f"**{site_cfg['label']}** access control device")
+st.caption(f"Daily attendance reports · {site_description}")
 
 if st.session_state.get("management_message"):
     st.success(st.session_state.pop("management_message"))
@@ -1917,7 +1797,10 @@ if selected_site != st.session_state.selected_site:
     except AttributeError:
         st.experimental_rerun()
 
-st.caption(f"Active device: {site_cfg['device_ip']}")
+if st.session_state.selected_site == ALL_STATIONS:
+    st.caption('All stations are checked when generating reports. Unavailable stations are skipped.')
+else:
+    st.caption(f"Active device: {site_cfg['device_ip']}")
 
 st.markdown("---")
 
@@ -1963,34 +1846,73 @@ if num_days>=28:   period_label="Monthly"
 elif num_days>=7:  period_label="Weekly"
 else:              period_label="Daily"
 
-st.markdown(f"<small style='color:{MUTED}'>{num_days} day(s) selected — <b>{period_label}</b> report</small>",
-            unsafe_allow_html=True)
+st.caption(f"{num_days} day(s) selected — **{period_label}** report")
 st.markdown("---")
 
 # ── Generate ──────────────────────────────────────────────────
-if st.button("View / Generate Reports"):
+with_lunch = False
+if st.session_state.selected_site == "Buguruni":
+    regular_button, lunch_button = st.columns(2)
+    with regular_button:
+        generate_report = st.button("View / Generate Reports", type="primary", width="stretch")
+    with lunch_button:
+        with_lunch = st.button("View report with lunch time", key="buguruni_lunch_report", width="stretch")
+else:
+    generate_report = st.button("View / Generate Reports", type="primary")
+
+if st.session_state.selected_site == ALL_STATIONS:
+    st.session_state.pop('attendance_report_snapshot', None)
+    render_all_stations(SITES, start_date, end_date, tag, generate_report,
+                        client_for, all_station_tables, get_logo_path())
+    st.stop()
+st.session_state.pop('all_station_snapshot', None)
+
+report_scope = (st.session_state.selected_site, start_date.isoformat(), end_date.isoformat(),
+                repr(SITES[st.session_state.selected_site]['employees']))
+if with_lunch or st.session_state.get('attendance_report_scope') != report_scope:
+    st.session_state.pop('attendance_report_snapshot', None)
+
+if generate_report or with_lunch:
+    st.session_state.pop('attendance_report_snapshot', None)
     progress=st.progress(0.0); status=st.empty()
 
     def upd(val,msg): progress.progress(val); status.info(msg)
+
+    status.info("Checking the current employee roster...")
+    try:
+        report_site = report_site_for(st.session_state.selected_site, SITES, management_store)
+    except (HikvisionError, OSError, ValueError, sqlite3.Error) as exc:
+        st.error(f"Could not verify the current employee roster. No report was generated. {exc}")
+        st.stop()
+    ALL_EMPLOYEES = report_site["employees"]
+    DEPT_ORDER = [dk for dk in report_site["dept_order"]
+                  if not ALL_EMPLOYEES[dk].get("visitor_only")]
+    DEPT_COLORS = report_site["dept_colors"]
 
     status.info("Connecting to device...")
     events,err=fetch_events(device_ip,username,password,start_date,end_date,upd)
     if err: st.error(f"Failed to fetch data: {err}"); st.stop()
 
-    progress.progress(0.56); status.info("Checking management movement across locations...")
-    manager_events, location_failures = fetch_mobile_manager_events(
-        st.session_state.selected_site, events, start_date, end_date,
-    )
-
-    # Normal staff remain tied to the active device. Only Mohamed's scans are
-    # replaced with the cross-site set so his first and last locations connect.
-    tagged_selected_events = tag_events_with_site(events, st.session_state.selected_site)
-    report_events = [
-        event for event in tagged_selected_events
-        if not is_mobile_manager_event(event)
-    ] + manager_events
+    if with_lunch:
+        report_events = tag_events_with_site(events, st.session_state.selected_site)
+        location_failures = {}
+    else:
+        progress.progress(0.56); status.info("Checking management movement across locations...")
+        manager_events, location_failures = fetch_mobile_manager_events(
+            st.session_state.selected_site, events, start_date, end_date,
+        )
+        # Preserve the existing cross-site journey in the normal report.
+        tagged_selected_events = tag_events_with_site(events, st.session_state.selected_site)
+        report_events = [event for event in tagged_selected_events
+                         if not is_mobile_manager_event(event)] + manager_events
 
     progress.progress(0.6); status.info("Processing records...")
+    report_events = current_report_events(report_events, report_site, MOBILE_MANAGER_NAME)
+    if with_lunch:
+        render_lunch_report(report_events, report_site, start_date, end_date, tag, get_logo_path())
+        progress.progress(1.0)
+        status.success("Lunch reports ready!")
+        st.stop()
     rows=parse_by_day(report_events,start_date,end_date)
 
     # Show the mobile manager on a branch report only when that branch recorded
@@ -2014,44 +1936,86 @@ if st.button("View / Generate Reports"):
         if mobile_department not in DEPT_ORDER:
             DEPT_ORDER.append(mobile_department)
 
+    rows_by_date=defaultdict(list)
+    for r in rows: rows_by_date[r["date"]].append(r)
+
+    # Retain this generated report for filter changes; never store connection credentials.
+    st.session_state['attendance_report_scope'] = report_scope
+    st.session_state['attendance_report_snapshot'] = {
+        'employees': ALL_EMPLOYEES, 'department_order': list(DEPT_ORDER),
+        'department_colors': DEPT_COLORS, 'rows': rows, 'rows_by_date': rows_by_date,
+        'location_failures': location_failures, 'generated_at': local_now().strftime('%d %b %Y, %H:%M'),
+    }
+
+report_snapshot = st.session_state.get('attendance_report_snapshot')
+if report_snapshot:
+    ALL_EMPLOYEES = report_snapshot['employees']
+    DEPT_ORDER = report_snapshot['department_order']
+    DEPT_COLORS = report_snapshot['department_colors']
+    rows = report_snapshot['rows']
+    rows_by_date = report_snapshot['rows_by_date']
+    location_failures = report_snapshot['location_failures']
+    if not generate_report:
+        progress = st.progress(0.65)
+        status = st.empty()
     if location_failures:
         st.warning(
             "Management movement could not be checked at: "
             + ", ".join(sorted(location_failures))
             + ". The selected site's main report is still available."
         )
-    rows_by_date=defaultdict(list)
-    for r in rows: rows_by_date[r["date"]].append(r)
 
-    # ── Summary cards ─────────────────────────────────────────
-    progress.progress(0.65)
-    total_present=len(rows)
-    all_members=sum(len(ALL_EMPLOYEES[dk]["members"]) for dk in DEPT_ORDER)
-    st.markdown("### Summary")
-    m1,m2,m3,m4,m5=st.columns(5)
-    m1.metric("Days", num_days)
-    m2.metric("Total Records", total_present)
-    m3.metric("Staff Roster", all_members)
-    m4.metric("Avg / Day", total_present//max(num_days,1))
-    unique_staff=len(set(r["name"] for r in rows))
-    m5.metric("Unique Staff", unique_staff)
+    if st.session_state.get('attendance_report_type', 'Full Attendance') == 'Full Attendance':
+        # ── Summary cards ─────────────────────────────────────────
+        progress.progress(0.65)
+        total_present=len(rows)
+        all_members=sum(len(ALL_EMPLOYEES[dk]["members"]) for dk in DEPT_ORDER)
+        st.markdown("### Summary")
+        m1,m2,m3,m4,m5=st.columns(5)
+        m1.metric("Days", num_days)
+        m2.metric("Total Records", total_present)
+        m3.metric("Staff Roster", all_members)
+        m4.metric("Avg / Day", total_present//max(num_days,1))
+        unique_staff=len(set(r["name"] for r in rows))
+        m5.metric("Unique Staff", unique_staff)
 
-    # ── Per-dept breakdown (last day or whole range) ───────────
-    last_rows=rows_by_date.get(end_date.strftime("%Y-%m-%d"),[])
-    dept_data_last=build_dept_data(last_rows)
-    st.markdown(f"**Department breakdown — {end_date.strftime('%d %B %Y')}**")
-    department_cards = ["<div class='department-grid'>"]
-    for dk in DEPT_ORDER:
-        pd_=dept_data_last[dk]
-        department_cards.append(
-            f"<div class='department-card' style='background:{DEPT_COLORS[dk]}'>"
-            f"<div style='color:#FFF3CD;font-weight:bold;font-size:11px'>{ALL_EMPLOYEES[dk]['label']}</div>"
-            f"<div style='color:#FFFFFF;font-size:22px;font-weight:bold'>{len(pd_['present'])}</div>"
-            f"<div style='color:#F2E7D5;font-size:10px'>of {len(pd_['present'])+len(pd_['absent'])}</div>"
-            f"</div>"
-        )
-    department_cards.append("</div>")
-    st.markdown("".join(department_cards),unsafe_allow_html=True)
+        # ── Per-dept breakdown (last day or whole range) ───────────
+        last_rows=rows_by_date.get(end_date.strftime("%Y-%m-%d"),[])
+        dept_data_last=build_dept_data(last_rows)
+        st.markdown(f"**Department breakdown — {end_date.strftime('%d %B %Y')}**")
+        department_cards = ["<div class='department-grid'>"]
+        for dk in DEPT_ORDER:
+            pd_=dept_data_last[dk]
+            department_cards.append(
+                f"<div class='department-card' style='--department-color:{DEPT_COLORS[dk]}'>"
+                f"<div class='department-name'>{ALL_EMPLOYEES[dk]['label']}</div>"
+                f"<div class='department-value'>{len(pd_['present'])}</div>"
+                f"<div class='department-total'>of {len(pd_['present'])+len(pd_['absent'])}</div>"
+                f"</div>"
+            )
+        department_cards.append("</div>")
+        st.markdown("".join(department_cards),unsafe_allow_html=True)
+
+    st.markdown('### Report Options')
+    st.caption('Generated ' + report_snapshot['generated_at'] + ' (Tanzania time). Use View / Generate Reports to refresh attendance.')
+    attendance_report_type = st.selectbox('Attendance report type', REPORT_TYPES, key='attendance_report_type')
+    if attendance_report_type in REPORT_NOTES:
+        st.caption(REPORT_NOTES[attendance_report_type])
+
+    if attendance_report_type != 'Full Attendance':
+        attendance_days = []
+        attendance_day = start_date
+        while attendance_day <= end_date:
+            attendance_days.append((attendance_day, build_dept_data(rows_by_date.get(attendance_day.isoformat(), []))))
+            attendance_day += timedelta(days=1)
+        tables = subset_tables(attendance_days, ALL_EMPLOYEES, attendance_report_type,
+            lambda department, arrival: get_shift_window(department, arrival)[0],
+            get_configured_employee_id)
+        render_subset_report(attendance_report_type, site_cfg['label'], start_date, end_date,
+                             tables, tag, get_logo_path())
+        progress.progress(1.0)
+        status.success(attendance_report_type + ' reports ready!')
+        st.stop()
 
     # ── Build files ───────────────────────────────────────────
     summary,total_days_n=build_summary(rows_by_date,start_date,end_date)
@@ -2075,7 +2039,6 @@ if st.button("View / Generate Reports"):
     progress.progress(1.0); status.success("Reports ready!")
 
     # ── Viewer and downloads ──────────────────────────────────
-    st.markdown("### Report Options")
     st.caption(
         "Download Reports opens by default. Select View Reports to preview "
         "the generated report directly on screen."
@@ -2090,18 +2053,13 @@ if st.button("View / Generate Reports"):
                 "shift ending time or later. Earlier or repeated scans remain blank."
             )
 
-        st.markdown(
-            """
-            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:4px 0 14px 0;">
-              <span style="font-weight:700;">Check-in key:</span>
-              <span style="background:#C6EFCE;color:#276221;padding:4px 10px;border:1px solid #9BCB9F;border-radius:4px;">Early</span>
-              <span style="background:#FFFFFF;color:#333333;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">On time</span>
-              <span style="background:#FFCCCC;color:#CC0000;padding:4px 10px;border:1px solid #E6A0A0;border-radius:4px;">Late</span>
-              <span style="background:#EEEEEE;color:#777777;padding:4px 10px;border:1px solid #CCCCCC;border-radius:4px;">Absent</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        legend = ['<div class="attendance-key"><strong>Check-in key:</strong>']
+        for label in ("Early", "On time", "Late", "Absent"):
+            background = ATTENDANCE_BADGES.get(label)
+            style = f' style="background:{background};color:white"' if background else ""
+            legend.append(f'<span class="attendance-badge"{style}>{label}</span>')
+        legend.append("</div>")
+        st.html("".join(legend))
 
         daily_view_tab, summary_view_tab = st.tabs([
             f"Daily Attendance ({num_days} day{'s' if num_days > 1 else ''})",
@@ -2213,8 +2171,7 @@ if st.button("View / Generate Reports"):
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         with summary_download_tab:
-            st.markdown(f"<small style='color:{MUTED}'>One row per employee — days present/absent, average check-in/out, total hours worked across the selected period.</small>",
-                        unsafe_allow_html=True)
+            st.caption("One row per employee — days present/absent, average check-in/out, total hours worked across the selected period.")
             d1,d2,d3=st.columns(3)
             with d1:
                 st.download_button("Download Word (.docx)",data=docx_summ,
@@ -2229,4 +2186,4 @@ if st.button("View / Generate Reports"):
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown("---")
-st.markdown(f"<small style='color:{MUTED}'>{site_cfg['label']} Shift Report System</small>",unsafe_allow_html=True)
+st.caption(f"{site_cfg['label']} Shift Report System · Version {ENROLLMENT_RELEASE}")

@@ -2,11 +2,15 @@ import os
 import tempfile
 import time
 import unittest
+import io
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 from roster_store import RosterStore
+from hikvision import HikvisionError
 
 
 class FakeTerminal:
@@ -28,11 +32,292 @@ class FakeTerminal:
 
 
 class InterfaceTests(unittest.TestCase):
+    def test_all_stations_combines_active_sites_skips_offline_and_filters_loaded_data(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            day = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
+            buguruni, ocean = FakeTerminal('http://buguruni.test'), FakeTerminal('http://ocean.test')
+            buguruni.users = {'102': {'employeeNo': '102', 'name': 'Abdallah Iddi Omary'},
+                              '103': {'employeeNo': '103', 'name': 'Abubakary Hussein Sharif'}}
+            ocean.users = {'1652': {'employeeNo': '1652', 'name': 'Haruni Kenedy Saimoni'}}
+            buguruni.search_events = lambda start, end: [{'employeeNoString': '102', 'name': 'Abdallah Iddi Omary', 'time': day+'T07:45:00+03:00'}]
+            ocean.search_events = lambda start, end: [{'employeeNoString': '1652', 'name': 'Haruni Kenedy Saimoni', 'time': day+'T05:50:00+03:00'}]
+            def client(name, sites):
+                if name == 'Buguruni': return buguruni
+                if name == 'Puma Ocean Road': return ocean
+                raise HikvisionError('Offline')
+            with patch('employee_management.client_for', side_effect=client) as factory, \
+                    patch('streamlit.download_button', return_value=False) as downloads:
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                at.radio(key='site_selector_row').set_value('All stations').run()
+                self.assertFalse(at.exception)
+                next(b for b in at.button if b.label == 'View / Generate Reports').click().run()
+                self.assertFalse(at.exception)
+                self.assertTrue(any('Included active stations: Buguruni, Puma Ocean Road' in item.value for item in at.success))
+                self.assertTrue(any('Skipped unavailable stations:' in item.value and 'India' in item.value for item in at.warning))
+                rendered = ' '.join(frame.value.to_string() for frame in at.dataframe)
+                for value in ['Buguruni', 'Puma Ocean Road', 'Haruni Kenedy Saimoni', 'Abubakary Hussein Sharif']:
+                    self.assertIn(value, rendered)
+                self.assertEqual(downloads.call_count, 3)
+                self.assertEqual(factory.call_count, 7)
+                at.selectbox(key='attendance_report_type').select('Absentees').run()
+                rendered = ' '.join(frame.value.to_string() for frame in at.dataframe)
+                self.assertIn('Abubakary Hussein Sharif', rendered)
+                self.assertNotIn('Haruni Kenedy Saimoni', rendered)
+                self.assertNotIn('Puma Upanga', rendered)
+                self.assertEqual(factory.call_count, 7)
+                at.selectbox(key='attendance_report_type').select('Early Attendance').run()
+                rendered = ' '.join(frame.value.to_string() for frame in at.dataframe)
+                self.assertIn('Abdallah Iddi Omary', rendered)
+                self.assertIn('Haruni Kenedy Saimoni', rendered)
+                at.selectbox(key='attendance_report_type').select('Checked In Only').run()
+                self.assertEqual(sum(len(frame.value) for frame in at.dataframe), 2)
+                self.assertEqual(factory.call_count, 7)
+
+    def test_all_stations_no_active_stations_has_no_reports_or_downloads(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}), \
+                patch('employee_management.client_for', side_effect=HikvisionError('Offline')), \
+                patch('streamlit.download_button', return_value=False) as downloads:
+            at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+            at.radio(key='site_selector_row').set_value('All stations').run()
+            next(b for b in at.button if b.label == 'View / Generate Reports').click().run()
+            self.assertFalse(at.exception)
+            self.assertTrue(any('No stations could be read' in item.value for item in at.error))
+            downloads.assert_not_called()
+            self.assertFalse(at.dataframe)
+
+    def test_filtered_attendance_view_and_downloads_share_selected_people(self):
+        for mode, expected_name, excluded_name in [
+            ('Early Attendance', 'Abdallah Iddi Omary', 'Abubakary Hussein Sharif'),
+            ('Checked In Only', 'Abdallah Iddi Omary', 'Abubakary Hussein Sharif'),
+            ('Absentees', 'Abubakary Hussein Sharif', 'Abdallah Iddi Omary'),
+        ]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+                terminal = FakeTerminal('http://fake.test')
+                terminal.users = {'102': {'employeeNo': '102', 'name': 'Abdallah Iddi Omary'},
+                                  '103': {'employeeNo': '103', 'name': 'Abubakary Hussein Sharif'}}
+                day = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
+                events = [{'employeeNoString': '102', 'name': 'Abdallah Iddi Omary', 'time': day+'T07:45:00+03:00'}]
+                response = type('Response', (), {'status_code': 200, 'json': lambda self: {
+                    'AcsEvent': {'InfoList': events, 'totalMatches': 1, 'numOfMatches': 1}}})()
+                with patch('employee_management.client_for', return_value=terminal), \
+                        patch('requests.post', return_value=response) as fetch, \
+                        patch('streamlit.download_button', return_value=False) as downloads:
+                    at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                    self.assertNotIn('attendance_report_type', [box.key for box in at.selectbox])
+                    next(b for b in at.button if b.label == 'View / Generate Reports').click().run()
+                    before_filter_requests = fetch.call_count
+                    downloads.reset_mock()
+                    at.selectbox(key='attendance_report_type').select(mode).run()
+                    self.assertFalse(at.exception)
+                    self.assertFalse(at.error)
+                    self.assertEqual(fetch.call_count, before_filter_requests)
+                    options_index = next(i for i, item in enumerate(at.main) if item.type == 'markdown' and item.value == '### Report Options')
+                    selector_index = next(i for i, item in enumerate(at.main) if item.type == 'selectbox' and item.key == 'attendance_report_type')
+                    self.assertLess(options_index, selector_index)
+                    rendered = ' '.join(frame.value.to_string() for frame in at.dataframe)
+                    self.assertIn(expected_name, rendered)
+                    self.assertNotIn(excluded_name, rendered)
+                    self.assertEqual(downloads.call_count, 3)
+                    self.assertEqual([tab.label for tab in at.tabs], ['Download Reports', 'View Reports'])
+                    for call in downloads.call_args_list:
+                        self.assertIn(mode.replace(' ', '_'), call.kwargs['file_name'])
+                    at.radio(key='site_selector_row').set_value('Puma Ocean Road').run()
+                    self.assertNotIn('attendance_report_type', [box.key for box in at.selectbox])
+                    self.assertFalse(at.dataframe)
+                    self.assertEqual(fetch.call_count, before_filter_requests)
+
+    def test_existing_employee_enrollment_without_adding_or_roster_membership(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            terminal = FakeTerminal('http://fake.test')
+            terminal.users = {'1652': {'employeeNo': '1652', 'name': 'Existing Unrostered Person',
+                                      'numOfFP': 0, 'numOfFace': 0, 'numOfCard': 0}}
+            with patch('employee_management.client_for', return_value=terminal), \
+                    patch.object(terminal, 'create_user', wraps=terminal.create_user) as create, \
+                    patch('employee_management.enroll_employee') as enroll:
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30)
+                at.session_state['management_account'] = 'HR'
+                at.session_state['management_last_seen'] = time.time()
+                at.session_state['management_open'] = True
+                at.run()
+                self.assertIn('Face / fingerprint', [tab.label for tab in at.tabs])
+                at.selectbox(key='manage_enroll_site').select('Puma Ocean Road').run()
+                self.assertFalse(enroll.called)
+                at.button(key='manage_enroll_existing_Puma Ocean Road_refresh').click().run()
+                at.selectbox(key='manage_enroll_existing_Puma Ocean Road_employee').select('1652').run()
+                self.assertFalse(at.exception)
+                self.assertEqual(enroll.call_args.args[0]['employeeNo'], '1652')
+                self.assertEqual(enroll.call_args.args[1], 'Puma Ocean Road')
+                self.assertNotIn('manage_enroll_existing_Buguruni_users', at.session_state)
+                create.assert_not_called()
+
+    def test_terminal_compatibility_check_needs_no_new_employee(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            terminal = FakeTerminal('http://fake.test')
+            terminal.terminal_diagnostics = lambda: {'Device': {'model': 'Example Terminal'}}
+            with patch('employee_management.client_for', return_value=terminal):
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30)
+                at.session_state['management_account'] = 'HR'
+                at.session_state['management_last_seen'] = time.time()
+                at.session_state['management_open'] = True
+                at.run()
+                at.selectbox(key='manage_add_site').select('Puma Survey').run()
+                at.button(key='manage_add_Puma Survey_check').click().run()
+                self.assertFalse(at.exception)
+                self.assertTrue(at.json)
+                self.assertEqual(terminal.users, {})
+
+    def test_streamlit_runner_does_not_launch_second_server_and_shows_release(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'ROSTER_DB_PATH': folder+'/roster.db'}), \
+                patch('subprocess.call') as relaunch:
+            os.environ.pop('_APP_LAUNCHED', None)
+            at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+            self.assertFalse(at.exception)
+            relaunch.assert_not_called()
+            self.assertTrue(any('Version 2026.10.22.3' in item.value for item in at.caption))
+
+    def test_lunch_button_is_on_right_and_only_visible_for_buguruni(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+            self.assertFalse(at.exception)
+            lunch = at.button(key='buguruni_lunch_report')
+            self.assertEqual(lunch.label, 'View report with lunch time')
+            report_columns = [column for column in at.get('column') if any(
+                button.label in ['View / Generate Reports', 'View report with lunch time'] for button in column.button)]
+            self.assertEqual([column.button[0].label for column in report_columns],
+                             ['View / Generate Reports', 'View report with lunch time'])
+            for site_name in ['Puma Upanga', 'Puma Ocean Road', 'Puma Survey', 'India', 'Kibaha', 'Livingstone']:
+                at.radio(key='site_selector_row').set_value(site_name).run()
+                self.assertFalse(at.exception)
+                self.assertFalse(any(button.key == 'buguruni_lunch_report' for button in at.button))
+                self.assertIn('View / Generate Reports', [button.label for button in at.button])
+
+    def test_lunch_button_generates_four_clockings_and_six_downloads(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            terminal = FakeTerminal('http://fake.test')
+            terminal.users = {'102': {'employeeNo': '102', 'name': 'Abdallah Iddi Omary'},
+                              '103': {'employeeNo': '103', 'name': 'Abubakary Hussein Sharif'}}
+            day = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
+            events = [{'employeeNoString': '102', 'name': 'Abdallah Iddi Omary',
+                       'time': day+'T'+time+':00+03:00'} for time in ['08:00', '13:00', '14:00', '16:00']]
+            # A deleted employee's scans must still be excluded in the new mode.
+            events.append({'employeeNoString': '999', 'name': 'Deleted Person', 'time': day+'T08:00:00+03:00'})
+            response = type('Response', (), {'status_code': 200, 'json': lambda self: {
+                'AcsEvent': {'InfoList': events, 'totalMatches': len(events), 'numOfMatches': len(events)}}})()
+            with patch('employee_management.client_for', return_value=terminal), \
+                 patch('requests.post', return_value=response) as fetch, \
+                 patch('streamlit.download_button', return_value=False) as downloads:
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                at.button(key='buguruni_lunch_report').click().run()
+                self.assertFalse(at.exception)
+                self.assertFalse(at.error)
+                self.assertEqual(fetch.call_count, 1)
+                metrics = {metric.label: metric.value for metric in at.metric}
+                self.assertEqual(metrics['Complete Days'], '1')
+                self.assertEqual(metrics['Staff Roster'], '2')
+                data = at.dataframe[0].value
+                present = data[data['ID'] == '102'].iloc[0]
+                self.assertEqual([present[key] for key in ['Check In', 'Lunch Out', 'Lunch In', 'Check Out']],
+                                 ['08:00', '13:00', '14:00', '16:00'])
+                self.assertEqual(present['Net Hours'], '7h 00m')
+                self.assertEqual(data[data['ID'] == '103'].iloc[0]['Status'], 'Absent')
+                self.assertNotIn('Deleted Person', data.to_string())
+                self.assertEqual(downloads.call_count, 6)
+                for call in downloads.call_args_list:
+                    self.assertIn('_With_Lunch_', call.kwargs['file_name'])
+
+    def test_three_upanga_aliases_load_in_delete_and_transfer_lists(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            terminal = FakeTerminal('http://fake.test')
+            terminal.users = {str(index): {'employeeNo': str(index), 'name': name}
+                              for index, name in enumerate(['Athumani Y Shebly', 'Hamlat S ghindu', 'Mnyeto M Rashid'], 901)}
+            terminal.users.pop('903')
+            terminal.users['1365'] = {'employeeNo': '1365', 'name': 'Mnyeto Miraji Rashidi'}
+            with patch('employee_management.client_for', return_value=terminal):
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                at.session_state['management_account'] = 'HR'
+                at.session_state['management_last_seen'] = time.time()
+                at.session_state['management_open'] = True
+                at.run()
+                at.selectbox(key='manage_delete_site').select('Puma Upanga').run()
+                at.button(key='manage_delete_Puma Upanga_refresh').click().run()
+                for employee_id, user in terminal.users.items():
+                    self.assertIn(user['name'], at.checkbox(key='manage_delete_Puma Upanga_tick_'+employee_id).label)
+                self.assertEqual(at.checkbox(key='manage_delete_Puma Upanga_tick_1365').label,
+                                 'Mnyeto Miraji Rashidi · ID 1365 · Security · SECURITY')
+                at.selectbox(key='manage_transfer_source').select('Puma Upanga').run()
+                at.button(key='manage_transfer_Puma Upanga_refresh').click().run()
+                options = at.selectbox(key='manage_transfer_Puma Upanga_choice').options
+                self.assertEqual(len(options), 3)
+                for user in terminal.users.values():
+                    self.assertTrue(any(user['name'] in option for option in options))
+                self.assertFalse(at.exception)
+
+    def test_generated_viewer_and_six_exports_exclude_deleted_staff_after_redeploy(self):
+        # Start with no saved overrides, as happens on a cloud replacement.
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            terminal = FakeTerminal('http://fake.test')
+            terminal.users = {
+                '102': {'employeeNo': '102', 'name': 'Abdallah Iddi Omary'},
+                '103': {'employeeNo': '103', 'name': 'Abubakary Hussein Sharif'},
+            }
+            day = (datetime.now(timezone(timedelta(hours=3))).date() - timedelta(days=1)).isoformat()
+            events = [{'employeeNoString': employee_id, 'name': name, 'time': day+'T08:00:00+03:00'}
+                      for employee_id, name in [('101', 'Ally Mohamedi Sadaka'),
+                                                ('999', 'Abdallah Iddi Removed'),
+                                                ('102', 'ABDALLAH IDDI OMARY')]]
+            response = type('Response', (), {'status_code': 200, 'json': lambda self: {
+                'AcsEvent': {'InfoList': events, 'totalMatches': len(events), 'numOfMatches': len(events)}}})()
+            with patch('employee_management.client_for', return_value=terminal), \
+                 patch('requests.post', return_value=response), \
+                 patch('streamlit.download_button', return_value=False) as downloads:
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                at.date_input[0].set_value(datetime.fromisoformat(day).date())
+                next(b for b in at.button if b.label == 'View / Generate Reports').click().run()
+                self.assertFalse(at.exception)
+                self.assertFalse(at.error)
+                metrics = {m.label: m.value for m in at.metric}
+                self.assertEqual(metrics['Staff Roster'], '2')
+                self.assertEqual(metrics['Total Records'], '1')
+                self.assertEqual(metrics['Unique Staff'], '1')
+                rendered = ' '.join(frame.value.to_string() for frame in at.dataframe)
+                self.assertIn('Abdallah Iddi Omary', rendered)
+                self.assertIn('Abubakary Hussein Sharif', rendered)
+                self.assertIn('Absent', rendered)
+                self.assertNotIn('Ally Mohamedi Sadaka', rendered)
+                self.assertNotIn('Abdallah Iddi Removed', rendered)
+                self.assertEqual(downloads.call_count, 6)
+                for call in downloads.call_args_list:
+                    filename = call.kwargs['file_name']
+                    data = call.kwargs['data']
+                    data = data.getvalue() if hasattr(data, 'getvalue') else data
+                    if filename.endswith('.pdf'):
+                        self.assertTrue(data.startswith(b'%PDF'))
+                        continue
+                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                        text = ' '.join(archive.read(name).decode('utf-8') for name in archive.namelist() if name.endswith('.xml'))
+                    self.assertIn('Abdallah Iddi Omary', text)
+                    self.assertIn('Abubakary Hussein Sharif', text)
+                    self.assertNotIn('Ally Mohamedi Sadaka', text)
+                    self.assertNotIn('Abdallah Iddi Removed', text)
+
+    def test_report_does_not_generate_when_current_employee_list_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
+            with patch('employee_management.client_for') as client_for, \
+                 patch('requests.post') as fetch, \
+                 patch('streamlit.download_button') as downloads:
+                client_for.return_value.search_users.side_effect = HikvisionError('Terminal unavailable')
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
+                next(b for b in at.button if b.label == 'View / Generate Reports').click().run()
+                self.assertFalse(at.exception)
+                self.assertIn('Could not verify the current employee roster', at.error[0].value)
+                fetch.assert_not_called()
+                downloads.assert_not_called()
+
     def test_public_reports_and_employee_add_delete(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
             terminal = FakeTerminal('http://fake.test')
             with patch('employee_management.client_for', return_value=terminal):
-                at = AppTest.from_file(str(Path(__file__).parents[1] / 'app.py'), default_timeout=30).run()
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
                 self.assertFalse(at.exception)
                 self.assertFalse(at.tabs)
                 self.assertIn('View / Generate Reports', [b.label for b in at.button])
@@ -42,7 +327,7 @@ class InterfaceTests(unittest.TestCase):
                 at.session_state['management_open'] = True
                 at.run()
                 self.assertFalse(at.exception)
-                self.assertEqual(len(at.tabs), 4)
+                self.assertEqual(len(at.tabs), 5)
                 at.selectbox(key='manage_add_site').select('Buguruni').run()
                 at.selectbox(key='manage_add_department_Buguruni').select('Shop').run()
                 at.selectbox(key='manage_add_job_Buguruni_Shop').select('SHOP')
@@ -76,7 +361,7 @@ class InterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
             terminal = FakeTerminal('http://fake.test')
             with patch('employee_management.client_for', return_value=terminal):
-                at = AppTest.from_file(str(Path(__file__).parents[1] / 'app.py'), default_timeout=30).run()
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
                 at.session_state['management_account'] = 'HR'
                 at.session_state['management_last_seen'] = time.time()
                 at.session_state['management_open'] = True
@@ -114,7 +399,7 @@ class InterfaceTests(unittest.TestCase):
                 store.save('HR', 'add', employee_id, name, destination='Buguruni', department='Shop', job='SHOP')
             terminal.users['999'] = {'employeeNo': '999', 'name': 'Not In Report'}
             with patch('employee_management.client_for', return_value=terminal):
-                at = AppTest.from_file(str(Path(__file__).parents[1] / 'app.py'), default_timeout=30).run()
+                at = AppTest.from_file(str(Path(__file__).parents[1] / 'App.py'), default_timeout=30).run()
                 at.session_state['management_account'] = 'HR'
                 at.session_state['management_last_seen'] = time.time()
                 at.session_state['management_open'] = True

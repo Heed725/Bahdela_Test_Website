@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import uuid
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import quoteattr
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 import requests
 from requests import Response
 from requests.auth import HTTPDigestAuth
+from biometric_protocol import decode_payload, face_multipart, format_rejected, prepare_face_jpeg
 
 
 class HikvisionError(RuntimeError):
@@ -32,6 +34,24 @@ class CapturedFingerprint:
 
 def response_message(result: ApiResult) -> str:
     payload = result.payload or {}
+    fingerprint = payload.get('FingerPrintStatus')
+    if isinstance(fingerprint, dict):
+        entries = fingerprint.get('StatusList', [])
+        if isinstance(entries, dict):
+            entries = entries.get('Status', entries)
+            if isinstance(entries, dict):
+                entries = [entries]
+        if isinstance(entries, list):
+            meanings = {'0': 'failed', '2': 'reader is offline', '3': 'poor quality; try again',
+                        '4': 'reader memory is full', '5': 'fingerprint already exists',
+                        '7': 'invalid fingerprint slot', '8': 'reader does not need this template',
+                        '10': 'reader firmware is too old'}
+            for entry in entries:
+                code = str(entry.get('cardReaderRecvStatus', '')) if isinstance(entry, dict) else ''
+                if code != '1':
+                    return 'Fingerprint was rejected: ' + meanings.get(code, 'unconfirmed reader status')
+        if fingerprint.get('status') == 'failed':
+            return 'Fingerprint was rejected by the terminal.'
     status = payload.get("ResponseStatus", payload)
     details = []
     for key in ("statusString", "subStatusCode", "errorMsg", "message"):
@@ -68,12 +88,12 @@ class HikvisionClient:
         self.session.headers.update({"Accept": "application/json"})
 
     def _send(self, method: str, path: str, **kwargs: Any) -> Response:
+        kwargs.setdefault('timeout', self.timeout)
+        kwargs.setdefault('verify', self.verify_tls)
         try:
             response = self.session.request(
                 method,
                 f"{self.base_url}{path}",
-                timeout=self.timeout,
-                verify=self.verify_tls,
                 **kwargs,
             )
         except requests.Timeout as exc:
@@ -95,13 +115,27 @@ class HikvisionClient:
             data = response.json()
             return data if isinstance(data, dict) else {"data": data}
         except ValueError:
-            return {}
+            return decode_payload(response)
 
     @staticmethod
     def _is_success(payload: dict[str, Any]) -> bool:
         status = payload.get("ResponseStatus", payload)
         if not isinstance(status, dict) or not payload:
             return False
+        fingerprint = payload.get('FingerPrintStatus')
+        if isinstance(fingerprint, dict):
+            if str(fingerprint.get('status', 'success')).lower() != 'success':
+                return False
+            entries = fingerprint.get('StatusList', [])
+            if isinstance(entries, dict):
+                entries = entries.get('Status', entries)
+                if isinstance(entries, dict):
+                    entries = [entries]
+            if not isinstance(entries, list) or any(
+                    not isinstance(item, dict) or str(item.get('cardReaderRecvStatus')) != '1' for item in entries):
+                return False
+            if 'totalStatus' in fingerprint and str(fingerprint['totalStatus']) != '1':
+                return False
         if "statusCode" not in status:
             return True
         code = str(status.get("statusCode", "1"))
@@ -157,26 +191,110 @@ class HikvisionClient:
         }
         return body
 
-    def upload_face(self, employee_no: str, image: bytes, filename: str = "face.jpg") -> ApiResult:
-        if not image:
-            raise HikvisionError("The selected face photograph is empty.")
-        metadata = {"faceLibType": "blackFD", "FDID": "1", "FPID": employee_no}
-        files = {
-            "FaceDataRecord": (None, json.dumps(metadata), "application/json"),
-            "FaceImage": (filename, image, "image/jpeg"),
-        }
-        return self._request("POST", "/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json", files=files)
+    def upload_face(self, employee_no: str, image: bytes, filename: str = "face.jpg",
+                    name: str = '', method: str = 'POST', path: str | None = None) -> ApiResult:
+        try:
+            image = prepare_face_jpeg(image)
+        except ValueError as exc:
+            raise HikvisionError(str(exc)) from None
+        metadata = {"faceLibType": "blackFD", "FDID": "1", "FPID": str(employee_no),
+                    "name": name, "saveFacePic": True}
+        path = path or '/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json'
+        request = face_multipart(metadata, image)
+        request['headers']['Connection'] = 'close'
+        result = self._request(method, path, **request)
+        # Some older terminal web interfaces name the binary form part "img".
+        # Retry only after an explicit format rejection, never on timeout/busy.
+        if format_rejected(result):
+            request = face_multipart(metadata, image, 'img')
+            request['headers']['Connection'] = 'close'
+            result = self._request(method, path, **request)
+        return result
+
+    def capture_profile(self):
+        """Read the station's own namespace/version; never trigger capture here."""
+        result = self._request('GET', '/ISAPI/AccessControl/CaptureFingerPrint/capabilities', timeout=(5, 10))
+        if result.status_code in (401, 403):
+            raise HikvisionError('The terminal denied access to fingerprint capabilities. Check this station’s connection account.')
+        profile = {'namespace': 'http://www.isapi.org/ver20/XMLSchema', 'version': '2.0',
+                   'available': result.ok, 'status': response_message(result) if not result.ok else 'Available'}
+        if result.ok and '<!DOCTYPE' not in result.text.upper():
+            try:
+                root = ET.fromstring(result.text)
+                if root.tag.rsplit('}', 1)[-1] == 'CaptureFingerPrint':
+                    profile['namespace'] = root.tag[1:].split('}', 1)[0] if root.tag.startswith('{') else ''
+                    profile['version'] = root.attrib.get('version', '2.0')
+                    for node in root.iter():
+                        if node.tag.rsplit('}', 1)[-1] == 'fingerNo':
+                            profile['finger_min'] = node.attrib.get('min', '1')
+                            profile['finger_max'] = node.attrib.get('max', '10')
+                            break
+            except ET.ParseError:
+                pass
+        return profile
+
+    def terminal_diagnostics(self):
+        """A small, read-only support report without secrets or employee data."""
+        report = {}
+        for label, path in (('Device', '/ISAPI/System/deviceInfo'),
+                            ('Access control', '/ISAPI/AccessControl/capabilities')):
+            try:
+                result = self._request('GET', path, timeout=(5, 10))
+                safe = {'HTTP': result.status_code}
+                if result.ok:
+                    def visit(value):
+                        if not isinstance(value, dict):
+                            return
+                        for key, item in value.items():
+                            if key in ('model', 'firmwareVersion', 'isSupportCaptureFingerPrint',
+                                       'isSupportFingerPrintCfg', 'isSupportFace') and not isinstance(item, (dict, list)):
+                                safe[key] = item
+                            elif isinstance(item, dict):
+                                visit(item)
+                    visit(result.payload)
+                else:
+                    safe['status'] = response_message(result)
+                report[label] = safe
+            except HikvisionError:
+                report[label] = {'status': 'Could not connect for this read-only check.'}
+        try:
+            report['Fingerprint capture'] = self.capture_profile()
+        except HikvisionError as exc:
+            report['Fingerprint capture'] = {'status': str(exc)}
+        return report
 
     def capture_fingerprint(self, finger_no: int = 1) -> CapturedFingerprint:
-        body = {"CaptureFingerPrint": {"fingerNo": finger_no}}
+        if not 1 <= finger_no <= 10:
+            raise HikvisionError('Choose a fingerprint slot between 1 and 10.')
+        try:
+            profile = self.capture_profile()
+        except HikvisionError as exc:
+            return CapturedFingerprint(message=str(exc))
+        # Use the namespace/version actually advertised by this terminal.
+        namespace = ' xmlns=' + quoteattr(profile['namespace']) if profile['namespace'] else ''
+        body = ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<CaptureFingerPrintCond' + namespace + ' version=' + quoteattr(profile['version']) + '>'
+                f'<fingerNo>{finger_no}</fingerNo></CaptureFingerPrintCond>').encode()
         result = self._request(
             "POST",
-            "/ISAPI/AccessControl/CaptureFingerPrint?format=json",
-            json=body,
+            "/ISAPI/AccessControl/CaptureFingerPrint",
+            data=body,
+            headers={'Content-Type': 'application/xml; charset=UTF-8',
+                     'Accept': 'application/xml, application/json, multipart/form-data', 'Connection': 'close'},
         )
+        attempts = ['XML capture: ' + (response_message(result) if not result.ok else 'Accepted')]
+        if format_rejected(result):
+            result = self._request('POST', '/ISAPI/AccessControl/CaptureFingerPrint?format=json',
+                                   json={'CaptureFingerPrintCond': {'fingerNo': finger_no}},
+                                   headers={'Connection': 'close'})
+            attempts.append('JSON capture: ' + (response_message(result) if not result.ok else 'Accepted'))
         if not result.ok:
-            return CapturedFingerprint(message=response_message(result))
+            return CapturedFingerprint(message='; '.join(attempts) + '. Use Check terminal compatibility for this station.')
         capture = result.payload.get("CaptureFingerPrint", result.payload.get("FingerPrintCapture", {}))
+        if not isinstance(capture, dict):
+            return CapturedFingerprint(message='The terminal returned an invalid fingerprint capture response.')
+        if str(capture.get('fingerNo', finger_no)) != str(finger_no):
+            return CapturedFingerprint(message='The terminal returned a different fingerprint slot; nothing was saved.')
         quality = capture.get("fingerPrintQuality", capture.get("quality"))
         try:
             quality = int(quality) if quality is not None else None
@@ -194,6 +312,7 @@ class HikvisionClient:
                 "employeeNo": employee_no,
                 "fingerPrintID": finger_no,
                 "enableCardReader": [1],
+                "checkEmployeeNo": True,
                 "fingerType": "normalFP",
                 "fingerData": finger_data,
             }
@@ -209,6 +328,7 @@ class HikvisionClient:
         """Fetch all pages, or exactly one person, without inferring IDs from names."""
         search_id = str(uuid.uuid4())
         users = []
+        seen_ids = set()
         position = 0
         while True:
             condition = {"searchID": search_id, "searchResultPosition": position, "maxResults": 30}
@@ -226,13 +346,59 @@ class HikvisionClient:
                 batch = [batch]
             if not isinstance(batch, list):
                 raise HikvisionError("The terminal returned an invalid employee list.")
+            batch_ids = [str(user.get('employeeNo') or '').strip()
+                         for user in batch if isinstance(user, dict)]
+            if len(batch_ids) != len(batch) or not all(batch_ids):
+                raise HikvisionError("The terminal returned an invalid employee list.")
+            if len(set(batch_ids)) != len(batch_ids) or seen_ids.intersection(batch_ids):
+                raise HikvisionError("The terminal repeated an employee page. Please retry.")
+            seen_ids.update(batch_ids)
             users.extend(batch)
             position += len(batch)
-            total = int(search.get("totalMatches", position) or 0)
-            if not batch or position >= total:
+            try:
+                total = int(search['totalMatches'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HikvisionError("The terminal did not confirm the complete employee count.") from exc
+            if total < position:
+                raise HikvisionError("The terminal employee list changed during loading. Please retry.")
+            if not batch and position < total:
+                raise HikvisionError("The terminal returned an incomplete employee list. Please retry.")
+            if position >= total:
                 return users
             if position > 100000:
                 raise HikvisionError("The terminal returned too many employee records.")
+
+    def search_events(self, start_date, end_date):
+        """Read complete attendance pages using this terminal's configured connection."""
+        search_id, position, events, seen_pages = str(uuid.uuid4()), 0, [], set()
+        while True:
+            result = self._request('POST', '/ISAPI/AccessControl/AcsEvent?format=json', json={
+                'AcsEventCond': {'searchID': search_id, 'searchResultPosition': position,
+                                 'maxResults': 30, 'major': 0, 'minor': 0,
+                                 'startTime': f'{start_date}T00:00:00+03:00',
+                                 'endTime': f'{end_date}T23:59:59+03:00'}})
+            if not result.ok:
+                raise HikvisionError('Could not read attendance: ' + response_message(result))
+            block = result.payload.get('AcsEvent')
+            if not isinstance(block, dict):
+                raise HikvisionError('The terminal returned an invalid attendance list.')
+            batch = block.get('InfoList', [])
+            if not isinstance(batch, list) or any(not isinstance(event, dict) for event in batch):
+                raise HikvisionError('The terminal returned an invalid attendance list.')
+            try:
+                total = int(block['totalMatches'])
+            except (KeyError, ValueError, TypeError) as exc:
+                raise HikvisionError('The terminal did not confirm the attendance count.') from exc
+            signature = repr(batch)
+            if batch and signature in seen_pages:
+                raise HikvisionError('The terminal repeated an attendance page.')
+            seen_pages.add(signature)
+            position += len(batch)
+            if total < position or (not batch and position < total) or position > 100000:
+                raise HikvisionError('The terminal returned an incomplete attendance list.')
+            events.extend(batch)
+            if position >= total:
+                return [event for event in events if event.get('employeeNoString') or event.get('employeeNo') or event.get('name')]
 
     def get_user(self, employee_no):
         for user in self.search_users(employee_no):

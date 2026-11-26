@@ -10,9 +10,12 @@ import streamlit as st
 from admin_auth import active_account, login, logout, require_permission
 from hikvision import HikvisionClient, HikvisionError, response_message
 from registration_sites import load_sites
-from roster_store import RosterStore, normalized
+from roster_store import RosterStore, normalized, configured_names
+from report_roster import current_report_roster
+from employee_lookup import find_terminal_employees
 from credential_transfer import (export_credentials, ensure_cards_available,
-                                 copy_credentials, verify_credentials)
+                                 copy_credentials, verify_credentials, Credentials, read_fingerprints)
+from biometric_protocol import prepare_face_jpeg, ENROLLMENT_RELEASE
 
 
 def secrets_dict():
@@ -38,6 +41,14 @@ def client_for(site_name, sites):
                            configured.timeout, configured.verify_tls)
 
 
+def report_site_for(site_name, sites, store):
+    # Re-read saved changes so another session's deletions are respected too.
+    current = copy.deepcopy(sites)
+    store.apply(current)
+    users = client_for(site_name, current).search_users()
+    return current_report_roster(current[site_name], users)
+
+
 def verify_identity(client, employee):
     live = client.get_user(employee['employeeNo'])
     if not live or normalized(live.get('name', '')) != normalized(employee.get('name', '')):
@@ -53,10 +64,11 @@ def add_employee(state, client, store, record, site, department, job=None):
 
 def delete_employee(state, client, store, employee, site, sites=None):
     actor = require_permission(state, 'delete')
-    require_report_member(employee, site, sites, store)
+    member = require_report_member(employee, site, sites, store)
     verify_identity(client, employee)
     client.delete_user(employee['employeeNo'])
-    store.save(actor, 'delete', employee['employeeNo'], employee['name'], source=site)
+    store.save(actor, 'delete', employee['employeeNo'], employee['name'], source=site,
+               old_name=member['roster_name'])
 
 
 def delete_employees(state, client, store, employees, site, sites):
@@ -80,40 +92,60 @@ def delete_employees(state, client, store, employees, site, sites):
     return {'deleted': deleted, 'failed': failed}
 
 
-def prepare_transfer(state, source_client, target_client, store, employee, source, target, department, sites=None, job=None):
+def prepare_transfer(state, source_client, target_client, store, employee, source, target, department, sites=None, job=None, reconcile_existing=False, include_face=True):
     require_permission(state, 'transfer')
     require_report_member(employee, source, sites, store)
     if source == target or source_client.base_url == target_client.base_url:
         raise HikvisionError('Choose a different destination location and terminal.')
     live = verify_identity(source_client, employee)
     # Export every enrolled credential before changing either terminal.
-    if target_client.get_user(live['employeeNo']):
+    existing = target_client.get_user(live['employeeNo'])
+    if existing and not reconcile_existing:
         raise HikvisionError('That employee ID already exists at the destination. No records were changed.')
-    credentials = export_credentials(source_client, live)
+    if existing and normalized(existing.get('name', '')) != normalized(live['name']):
+        raise HikvisionError('The destination employee ID belongs to a different person. No records were changed.')
+    try:
+        credentials = export_credentials(source_client, live, include_face=include_face)
+    except HikvisionError as exc:
+        raise HikvisionError(f'Source {source}: {exc}') from None
     ensure_cards_available(target_client, live['employeeNo'], credentials)
-    allowed = ('employeeNo', 'name', 'userType', 'gender', 'Valid', 'doorRight', 'RightPlan')
-    user = {key: live[key] for key in allowed if key in live}
-    result = target_client._request('POST', '/ISAPI/AccessControl/UserInfo/Record?format=json', json={'UserInfo': user})
-    if not result.ok:
-        raise HikvisionError('Destination employee was not created: ' + response_message(result))
+    if not existing:
+        allowed = ('employeeNo', 'name', 'userType', 'gender', 'Valid', 'doorRight', 'RightPlan')
+        user = {key: live[key] for key in allowed if key in live}
+        result = target_client._request('POST', '/ISAPI/AccessControl/UserInfo/Record?format=json', json={'UserInfo': user})
+        if not result.ok:
+            raise HikvisionError('Destination employee was not created: ' + response_message(result))
     pending = {'employee': {'employeeNo': str(employee['employeeNo']), 'name': employee['name']},
                'source': source, 'target': target, 'department': department, 'job': job,
                'source_url': source_client.base_url, 'target_url': target_client.base_url,
-               'credentials_verified': False, 'credential_counts': credentials.counts()}
+               'credentials_verified': False, 'credential_counts': credentials.counts(),
+               'existing_destination': bool(existing), 'include_face': bool(include_face)}
     # Keep only metadata in session so a partial copy can be retried safely.
-    state['management_transfer'] = pending
+    if not existing:
+        state['management_transfer'] = pending
     _copy_transfer_credentials(state, source_client, target_client, store, pending, live, credentials)
+    state['management_transfer'] = pending
     return pending
 
 
 def _copy_transfer_credentials(state, source_client, target_client, store, pending, live, credentials):
     pending['credentials_verified'] = False
     verify_identity(target_client, pending['employee'])
-    copy_credentials(target_client, live, credentials)
+    # Reconciliation only verifies an existing account; it never overwrites it.
+    if not pending.get('existing_destination'):
+        copy_credentials(target_client, live, credentials)
     saved = verify_identity(target_client, pending['employee'])
-    destination_manifest = verify_credentials(target_client, saved, credentials)
+    if pending.get('existing_destination'):
+        _verify_existing_access(live, saved)
+    try:
+        destination_manifest = verify_credentials(target_client, saved, credentials,
+                                                  complete=bool(pending.get('existing_destination')),
+                                                  include_face=pending.get('include_face', True))
+    except HikvisionError as exc:
+        raise HikvisionError(f'Destination {pending["target"]}: {exc}') from None
     # Reject enrollment changes during the copy; the source must stay intact.
-    fresh = export_credentials(source_client, verify_identity(source_client, pending['employee']))
+    fresh = export_credentials(source_client, verify_identity(source_client, pending['employee']),
+                               include_face=pending.get('include_face', True))
     if fresh.manifest() != credentials.manifest():
         raise HikvisionError('Source credentials changed during copying. Retry the copy before finishing.')
     actor = require_permission(state, 'transfer')
@@ -121,6 +153,12 @@ def _copy_transfer_credentials(state, source_client, target_client, store, pendi
                destination=pending['target'], department=pending['department'], job=pending.get('job'))
     pending.update(credentials_verified=True, credential_counts=credentials.counts(),
                    source_manifest=credentials.manifest(), destination_manifest=destination_manifest)
+
+
+def _verify_existing_access(source, destination):
+    for key in ('userType', 'Valid', 'doorRight', 'RightPlan'):
+        if key in source and destination.get(key) != source[key]:
+            raise HikvisionError('Existing destination access settings differ from the source. No settings were overwritten; source employee remains active.')
 
 
 def _check_transfer_terminals(source_client, target_client, pending):
@@ -136,7 +174,7 @@ def retry_transfer_credentials(state, source_client, target_client, store, pendi
     require_report_member(pending['employee'], pending['source'], sites, store)
     live = verify_identity(source_client, pending['employee'])
     verify_identity(target_client, pending['employee'])
-    credentials = export_credentials(source_client, live)
+    credentials = export_credentials(source_client, live, include_face=pending.get('include_face', True))
     _copy_transfer_credentials(state, source_client, target_client, store, pending, live, credentials)
     return pending
 
@@ -144,22 +182,27 @@ def retry_transfer_credentials(state, source_client, target_client, store, pendi
 def finish_transfer(state, source_client, target_client, store, pending, sites=None):
     require_permission(state, 'transfer')
     employee = pending['employee']
-    require_report_member(employee, pending['source'], sites, store)
+    member = require_report_member(employee, pending['source'], sites, store)
     _check_transfer_terminals(source_client, target_client, pending)
     if not pending.get('credentials_verified') or not pending.get('source_manifest'):
         raise HikvisionError('Copy and verify all credentials before finishing the transfer. Source employee remains active.')
     saved = verify_identity(target_client, employee)
     live = verify_identity(source_client, employee)
-    credentials = export_credentials(source_client, live)
+    if pending.get('existing_destination'):
+        _verify_existing_access(live, saved)
+    credentials = export_credentials(source_client, live, include_face=pending.get('include_face', True))
     if credentials.manifest() != pending['source_manifest']:
         raise HikvisionError('Source credentials changed. Retry the credential copy before finishing.')
-    destination = verify_credentials(target_client, saved, credentials)
+    destination = verify_credentials(target_client, saved, credentials,
+                                     complete=bool(pending.get('existing_destination')),
+                                     include_face=pending.get('include_face', True))
     if destination != pending['destination_manifest']:
         raise HikvisionError('Destination credentials changed. Retry the credential copy before finishing.')
     actor = require_permission(state, 'transfer')
     source_client.delete_user(employee['employeeNo'])
     store.save(actor, 'transfer', employee['employeeNo'], employee['name'],
-               source=pending['source'], destination=pending['target'], department=pending['department'], job=pending.get('job'))
+               source=pending['source'], destination=pending['target'], department=pending['department'],
+               job=pending.get('job'), old_name=member['roster_name'])
 
 
 def render_login():
@@ -200,6 +243,7 @@ def report_employees(site, sites):
             ids = {normalized(n): str(i) for n, i in config.get('member_ids', {}).items()}
             jobs = {normalized(n): j for n, j in config.get('member_jobs', {}).items()}
             result.append({'name': name, 'employeeNo': ids.get(normalized(name), ''),
+                           'name_keys': configured_names(config, name),
                            'department': department, 'job': jobs.get(normalized(name), config.get('default_job', config.get('label', department)))})
     return result
 
@@ -208,14 +252,18 @@ def filter_report_users(users, site, sites):
     roster = report_employees(site, sites)
     matches = []
     for user in users:
-        # A configured ID must match. Use the exact full name only where the
-        # original static roster has no ID. Never match by first two names.
-        candidates = [r for r in roster if normalized(r['name']) == normalized(user.get('name', ''))
+        # A configured ID must match. ID-less names may use only site-specific,
+        # explicit aliases. Never infer an identity from shared first names.
+        candidates = [r for r in roster if normalized(user.get('name', '')) in r['name_keys']
                       and (not r['employeeNo'] or r['employeeNo'] == str(user.get('employeeNo', '')))]
-        unambiguous = bool(candidates and candidates[0]['employeeNo']) or sum(
-            normalized(u.get('name', '')) == normalized(user.get('name', '')) for u in users) == 1
-        if len(candidates) == 1 and unambiguous:
-            matches.append({**user, 'department': candidates[0]['department'], 'job': candidates[0]['job']})
+        if len(candidates) != 1:
+            continue
+        member = candidates[0]
+        if not member['employeeNo'] and sum(
+                normalized(u.get('name', '')) in member['name_keys'] for u in users) != 1:
+            continue
+        matches.append({**user, 'department': member['department'], 'job': member['job'],
+                        'roster_name': member['name']})
     return sorted(matches, key=lambda r: (normalized(r['name']), str(r.get('employeeNo', ''))))
 
 
@@ -224,8 +272,10 @@ def require_report_member(employee, site, sites, store):
         raise HikvisionError('The site report roster is required before managing this employee.')
     current = copy.deepcopy(sites)
     store.apply(current)
-    if not filter_report_users([employee], site, current):
+    matches = filter_report_users([employee], site, current)
+    if not matches:
         raise HikvisionError('This employee is not in this location’s report roster. Refresh the list.')
+    return matches[0]
 
 
 def department_choice(site, sites, key, store):
@@ -325,35 +375,90 @@ def render_delete_list(site, sites, store):
         st.rerun()
 
 
+def render_terminal_check(site, sites, key):
+    if st.button('Check terminal compatibility', key=key + '_check'):
+        require_permission(st.session_state, 'list')
+        with st.spinner('Reading terminal model and supported enrollment options…'):
+            st.session_state[key + '_compatibility'] = client_for(site, sites).terminal_diagnostics()
+    if key + '_compatibility' in st.session_state:
+        with st.expander('Terminal compatibility', expanded=True):
+            st.json(st.session_state[key + '_compatibility'])
+
+
 def enroll_employee(employee, site, sites, key):
     st.caption(f"Biometrics: {employee['name']} · {employee['employeeNo']} · {site}")
     photo = st.file_uploader('Face photograph (JPEG)', type=['jpg', 'jpeg'], key=key + '_photo')
+    st.caption('Use a clear, front-facing JPEG up to 20 MB. Large photographs are resized automatically for the terminal.')
     if st.button('Save face at this location', disabled=photo is None, key=key + '_face'):
         require_permission(st.session_state, 'enroll')
         client = client_for(site, sites)
         verify_identity(client, employee)
-        result = client.upload_face(employee['employeeNo'], photo.getvalue(), photo.name)
+        result = client.upload_face(employee['employeeNo'], photo.getvalue(), photo.name, name=employee['name'])
         if not result.ok:
             raise HikvisionError('Face was not saved: ' + response_message(result))
+        saved = verify_identity(client, employee)
+        verify_credentials(client, saved, Credentials(face=prepare_face_jpeg(photo.getvalue())))
         st.success('Face saved at ' + site)
     st.caption('For fingerprint capture, the employee must stand beside this location’s terminal.')
     if st.button('Capture and save fingerprint', key=key + '_finger'):
         require_permission(st.session_state, 'enroll')
         client = client_for(site, sites)
         verify_identity(client, employee)
-        captured = client.capture_fingerprint(1)
+        with st.spinner('Place the employee’s finger on the selected station’s scanner…'):
+            captured = client.capture_fingerprint(1)
         if not captured.data:
-            raise HikvisionError(captured.message or 'No fingerprint returned by the terminal.')
+            raise HikvisionError('Fingerprint capture failed: ' + (captured.message or 'No fingerprint returned by the terminal.'))
         result = client.apply_fingerprint(employee['employeeNo'], captured.data, 1)
         if not result.ok:
             raise HikvisionError('Fingerprint was not saved: ' + response_message(result))
+        verify_identity(client, employee)
+        fingers = read_fingerprints(client, employee['employeeNo'])
+        if not any(finger['fingerPrintID'] == 1 and finger['fingerData'] == captured.data for finger in fingers):
+            raise HikvisionError('The terminal did not confirm the saved fingerprint. Try again before relying on it.')
         st.success('Fingerprint saved at ' + site)
+
+
+def render_existing_enrollment(sites):
+    st.write('Add a face photograph or fingerprint to an existing employee at their current station.')
+    site = st.selectbox('Enrollment station *', list(sites), index=None, key='manage_enroll_site')
+    if not site:
+        return
+    key = 'manage_enroll_existing_' + site
+    if st.button('Load / refresh terminal employees', key=key + '_refresh'):
+        require_permission(st.session_state, 'list')
+        with st.spinner('Loading employees from ' + site + '…'):
+            users = client_for(site, sites).search_users()
+        # Enrollment is independent of the report roster. Keep only the fields
+        # required to select a person and show their enrollment status.
+        fields = ('employeeNo', 'name', 'numOfFP', 'numOfFace', 'numOfCard')
+        st.session_state[key + '_users'] = [
+            {field: user[field] for field in fields if field in user} for user in users]
+    users = st.session_state.get(key + '_users')
+    if users is None:
+        st.info('Load the station’s employees, then select the person to enroll.')
+        return
+    if not users:
+        st.info('No employees were found on this terminal.')
+        return
+    users_by_id = {str(user['employeeNo']): user for user in users}
+    employee_id = st.selectbox('Employee to enroll *',
+        sorted(users_by_id, key=lambda uid: (normalized(users_by_id[uid].get('name', '')), uid)),
+        index=None, key=key + '_employee',
+        format_func=lambda uid: f"{users_by_id[uid].get('name', '')} · ID {uid}")
+    if employee_id is None:
+        return
+    employee = users_by_id[employee_id]
+    st.caption(f"Currently enrolled: {employee.get('numOfFP', 'Not reported')} fingerprint(s), "
+               f"{employee.get('numOfFace', 'Not reported')} face photograph(s), "
+               f"{employee.get('numOfCard', 'Not reported')} card(s). Refresh after saving to update these counts.")
+    enroll_employee(employee, site, sites, key + '_' + employee_id)
 
 
 def render_management(sites, store):
     if not active_account(st.session_state) or not st.session_state.get('management_open'):
         return
     with st.expander('Employee management', expanded=True):
+        st.caption('Enrollment update: ' + ENROLLMENT_RELEASE)
         st.caption('Add, delete or transfer employees on the selected Hikvision terminal and in the report roster.')
         try:
             _render_management(sites, store)
@@ -364,11 +469,43 @@ def render_management(sites, store):
 
 
 def _render_management(sites, store):
-    add_tab, transfer_tab, delete_tab, history_tab = st.tabs(['Add employee', 'Transfer employee', 'Delete employee', 'History'])
+    with st.expander('Find employee across all terminals'):
+        st.caption('Read-only search of all terminal accounts, including employees outside the report roster. Separate name variants or IDs with commas.')
+        query = st.text_input('Employee name or ID', key='manage_lookup_query')
+        if st.button('Search all terminals', disabled=not query.strip()):
+            require_permission(st.session_state, 'list')
+            clients = {site: client_for(site, sites) for site in sites}
+            with st.spinner('Checking all terminals…'):
+                matches, statuses = find_terminal_employees(clients, query)
+            st.session_state['manage_lookup_result'] = (query, matches, statuses)
+        result = st.session_state.get('manage_lookup_result')
+        if result:
+            searched, matches, statuses = result
+            st.caption('Results for: ' + searched)
+            if matches:
+                st.dataframe(matches, use_container_width=True, hide_index=True)
+                for match in matches:
+                    st.write(f"{match['Station']} · {match['Name']} · ID {match['Employee ID']}")
+                    st.write(f"Enrolled: {match.get('Fingerprints', 'Not reported')} fingerprint(s), {match.get('Face photographs', 'Not reported')} face photograph(s), {match.get('Cards', 'Not reported')} card(s).")
+                    st.caption(f"User type: {match.get('User type', 'Not reported')} · Door access: {match.get('Door access', 'Not reported')} · Validity enabled: {match.get('Validity enabled', 'Not reported')} · Valid from: {match.get('Valid from', 'Not reported')} · Valid until: {match.get('Valid until', 'Not reported')}")
+            else:
+                st.info('No matching accounts found on the terminals that responded.')
+            for status in statuses:
+                message = f"{status['Station']}: {status['Status']} ({status['Records checked']} records checked)"
+                if status['Status'] == 'Checked':
+                    st.caption(message)
+                else:
+                    st.warning(message)
+    with st.container(key='employee_management_tabs'):
+        add_tab, enroll_tab, transfer_tab, delete_tab, history_tab = st.tabs([
+            'Add employee', 'Face / fingerprint', 'Transfer employee', 'Delete employee', 'History'])
     names = list(sites)
+    with enroll_tab:
+        render_existing_enrollment(sites)
     with add_tab:
         site = st.selectbox('Where should this person be placed? *', names, index=None, key='manage_add_site')
         if site:
+            render_terminal_check(site, sites, 'manage_add_' + site)
             department = department_choice(site, sites, 'manage_add_department_' + site, store)
             job = job_choice(site, department, sites, 'manage_add_job_' + site + '_' + department) if department else None
             with st.form('manage_add_form_' + site):
@@ -398,10 +535,13 @@ def _render_management(sites, store):
         pending = st.session_state.get('management_transfer')
         if pending:
             st.info(f"{pending['employee']['name']}: source remains active at {pending['source']} until you finish the transfer to {pending['target']}.")
+            if not pending.get('include_face', True):
+                st.warning('Face photograph excluded from this transfer. The source photo will not be copied; existing destination photos are kept.')
             ready = pending.get('credentials_verified', False)
             if ready:
                 counts = pending['credential_counts']
-                st.success(f"Copied and verified: {counts['fingerprints']} fingerprint(s), {counts['faces']} face photograph(s), {counts['cards']} card(s).")
+                action = 'Verified existing account' if pending.get('existing_destination') else 'Copied and verified'
+                st.success(f"{action}: {counts['fingerprints']} fingerprint(s), {counts['faces']} face photograph(s), {counts['cards']} card(s).")
             else:
                 st.warning('Credential copying is incomplete. The source employee remains active. Retry copying before finishing.')
             if st.button('Retry credential copy', key='manage_transfer_retry'):
@@ -414,7 +554,11 @@ def _render_management(sites, store):
                 finish_transfer(st.session_state, client_for(pending['source'], sites), client_for(pending['target'], sites), store, pending, sites=sites)
                 st.session_state.pop('management_transfer', None)
                 st.session_state.pop('manage_transfer_confirm', None)
-                st.session_state['management_message'] = 'Transfer completed with fingerprints, face photograph and cards. Source employee removed.'
+                counts = pending['credential_counts']
+                st.session_state['management_message'] = (
+                    f"Transfer completed to {pending['target']} / {pending['department']}: "
+                    f"{counts['fingerprints']} fingerprint(s), {counts['faces']} face photograph(s), "
+                    f"{counts['cards']} card(s). Source employee removed.")
                 st.rerun()
             if st.button('Pause transfer (keep both active)'):
                 st.session_state['management_open'] = False
@@ -428,10 +572,14 @@ def _render_management(sites, store):
                 department = department_choice(target, sites, 'manage_transfer_department_' + target, store) if target else None
                 job = job_choice(target, department, sites, 'manage_transfer_job_' + target + '_' + department) if department else None
                 confirmed = st.checkbox('I confirm the selected employee and destination.', key='manage_transfer_start_confirm_' + source)
+                reconcile_existing = st.checkbox('Verify an existing destination account for this same employee without overwriting its credentials.', key='manage_transfer_reconcile_' + source)
+                include_face = st.checkbox('Copy enrolled face photograph', value=True, key='manage_transfer_include_face_' + source)
+                if not include_face:
+                    st.warning('Only fingerprints and cards will be transferred. The source face photo will not be copied; existing destination photos are kept.')
                 if st.button('Prepare destination', disabled=not (employee and target and department and job and confirmed)):
                     st.session_state.pop('manage_transfer_confirm', None)
                     with st.spinner('Copying employee, fingerprints, face photograph and cards…'):
-                        st.session_state['management_transfer'] = prepare_transfer(st.session_state, client_for(source, sites), client_for(target, sites), store, employee, source, target, department, sites=sites, job=job)
+                        st.session_state['management_transfer'] = prepare_transfer(st.session_state, client_for(source, sites), client_for(target, sites), store, employee, source, target, department, sites=sites, job=job, reconcile_existing=reconcile_existing, include_face=include_face)
                     st.rerun()
     with delete_tab:
         site = st.selectbox('Delete from which location? *', names, index=None, key='manage_delete_site')
