@@ -330,8 +330,11 @@ def load_report_users(site, sites, store, key, clear_ticks=False):
                         st.session_state.pop(widget_key, None)
     snapshot = store.load_terminal_roster(site)
     if snapshot is None:
-        st.info('Connect to the terminal and load employees once to save an offline list for this station.')
-        return []
+        roster_users = [employee for employee in report_employees(site, sites) if employee['employeeNo']]
+        users = filter_report_users(roster_users, site, sites)
+        if not users:
+            st.info('No employees with a saved employee ID are available for this station.')
+        return users
     synced_at, loaded = snapshot
     local_time = datetime.fromisoformat(synced_at).replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3)))
     st.caption(f'Saved employee list · Last synced {local_time:%d %b %Y, %H:%M} EAT')

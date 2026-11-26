@@ -328,9 +328,14 @@ class InterfaceTests(unittest.TestCase):
                     at.session_state['management_open'] = True
                     at.run()
                     at.selectbox(key='manage_delete_site').select('Buguruni').run()
-                    if not refresh_online:
+                    at.selectbox(key='manage_transfer_source').select('Buguruni').run()
+                    self.assertIn('Offline Test Employee', at.checkbox(key='manage_delete_Buguruni_tick_00801').label)
+                    self.assertIn('00801 · Offline Test Employee · Shop · SHOP',
+                                  at.selectbox(key='manage_transfer_Buguruni_choice').options)
+                    if refresh_online:
+                        search.assert_not_called()
+                    else:
                         search.assert_called_once()
-                        self.assertIn('Offline Test Employee', at.checkbox(key='manage_delete_Buguruni_tick_00801').label)
                         search.side_effect = HikvisionError('Terminal unavailable')
                     at.button(key='manage_delete_Buguruni_refresh').click().run()
                     self.assertFalse(at.exception)
