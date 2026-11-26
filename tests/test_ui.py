@@ -313,6 +313,33 @@ class InterfaceTests(unittest.TestCase):
                 fetch.assert_not_called()
                 downloads.assert_not_called()
 
+    def test_saved_employee_list_survives_a_new_session_and_failed_refresh(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'ROSTER_DB_PATH': folder + '/roster.db'}):
+            store = RosterStore(folder + '/roster.db')
+            store.save('HR', 'add', '00801', 'Offline Test Employee', destination='Buguruni', department='Shop')
+            entrypoint = str(Path(__file__).parents[1] / 'App.py')
+            with patch('employee_management.client_for') as terminal:
+                search = terminal.return_value.search_users
+                search.return_value = [{'employeeNo': '00801', 'name': 'Offline Test Employee', 'numOfFP': 2}]
+                for refresh_online in (True, False):
+                    at = AppTest.from_file(entrypoint, default_timeout=30).run()
+                    at.session_state['management_account'] = 'HR'
+                    at.session_state['management_last_seen'] = time.time()
+                    at.session_state['management_open'] = True
+                    at.run()
+                    at.selectbox(key='manage_delete_site').select('Buguruni').run()
+                    if not refresh_online:
+                        search.assert_called_once()
+                        self.assertIn('Offline Test Employee', at.checkbox(key='manage_delete_Buguruni_tick_00801').label)
+                        search.side_effect = HikvisionError('Terminal unavailable')
+                    at.button(key='manage_delete_Buguruni_refresh').click().run()
+                    self.assertFalse(at.exception)
+                    self.assertTrue(any('Last synced' in caption.value for caption in at.caption))
+                    self.assertIn('Offline Test Employee', at.checkbox(key='manage_delete_Buguruni_tick_00801').label)
+                self.assertTrue(any('Could not refresh employees' in warning.value for warning in at.warning))
+                self.assertEqual(store.load_terminal_roster('Buguruni')[1],
+                                 [{'employeeNo': '00801', 'name': 'Offline Test Employee'}])
+
     def test_public_reports_and_employee_add_delete(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'_APP_LAUNCHED': '1', 'ROSTER_DB_PATH': folder+'/roster.db'}):
             terminal = FakeTerminal('http://fake.test')

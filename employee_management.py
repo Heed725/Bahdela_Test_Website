@@ -2,7 +2,7 @@
 import os
 import copy
 import sqlite3
-from datetime import date, time
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -315,26 +315,34 @@ def job_choice(site, department, sites, key):
     return choice
 
 
-def load_report_users(site, sites, key, clear_ticks=False):
+def load_report_users(site, sites, store, key, clear_ticks=False):
+    require_permission(st.session_state, 'list')
     if st.button('Load / refresh report employees', key=key + '_refresh'):
-        require_permission(st.session_state, 'list')
-        st.session_state[key + '_users'] = client_for(site, sites).search_users()
-        if clear_ticks:
-            for widget_key in list(st.session_state):
-                if widget_key.startswith(key + '_tick_'):
-                    st.session_state.pop(widget_key, None)
-    loaded = st.session_state.get(key + '_users')
-    if loaded is None:
-        st.info('Load employees assigned to this site’s report roster first.')
+        try:
+            live_users = client_for(site, sites).search_users()
+        except HikvisionError:
+            st.warning('Could not refresh employees from the terminal.')
+        else:
+            store.save_terminal_roster(site, live_users)
+            if clear_ticks:
+                for widget_key in list(st.session_state):
+                    if widget_key.startswith(key + '_tick_'):
+                        st.session_state.pop(widget_key, None)
+    snapshot = store.load_terminal_roster(site)
+    if snapshot is None:
+        st.info('Connect to the terminal and load employees once to save an offline list for this station.')
         return []
+    synced_at, loaded = snapshot
+    local_time = datetime.fromisoformat(synced_at).replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3)))
+    st.caption(f'Saved employee list · Last synced {local_time:%d %b %Y, %H:%M} EAT')
     users = filter_report_users(loaded, site, sites)
     if not users:
         st.info('No matching report-roster employees were found on this terminal.')
     return users
 
 
-def selected_employee(site, sites, key):
-    users = load_report_users(site, sites, key)
+def selected_employee(site, sites, store, key):
+    users = load_report_users(site, sites, store, key)
     if not users:
         return None
     choice = st.selectbox('Employee', [str(u['employeeNo']) for u in users], index=None,
@@ -353,8 +361,13 @@ def render_delete_list(site, sites, store):
         for failure in results['failed']:
             employee = failure['employee']
             st.error(f"{employee['name']} (ID {employee['employeeNo']}): {failure['error']}")
-    users = load_report_users(site, sites, key, clear_ticks=True)
+    users = load_report_users(site, sites, store, key, clear_ticks=True)
     if not users:
+        return
+    query = normalized(st.text_input('Search by name or employee ID', key=key + '_search'))
+    users = [user for user in users if query in normalized(user['name']) or query in user['employeeNo']]
+    if not users:
+        st.info('No employees match your search.')
         return
     st.write('Tick the employees who should be removed from this location.')
     selected = []
@@ -369,9 +382,6 @@ def render_delete_list(site, sites, store):
         with st.spinner('Deleting the selected employees…'):
             results = delete_employees(st.session_state, client_for(site, sites), store, selected, site, sites)
         st.session_state[key + '_results'] = results
-        deleted_ids = {str(employee['employeeNo']) for employee in results['deleted']}
-        st.session_state[key + '_users'] = [u for u in st.session_state.get(key + '_users', [])
-                                           if str(u.get('employeeNo')) not in deleted_ids]
         st.rerun()
 
 
@@ -567,7 +577,7 @@ def _render_management(sites, store):
         else:
             source = st.selectbox('Current location *', names, index=None, key='manage_transfer_source')
             if source:
-                employee = selected_employee(source, sites, 'manage_transfer_' + source)
+                employee = selected_employee(source, sites, store, 'manage_transfer_' + source)
                 target = st.selectbox('Where should this person be transferred? *', [n for n in names if n != source], index=None, key='manage_transfer_target_' + source)
                 department = department_choice(target, sites, 'manage_transfer_department_' + target, store) if target else None
                 job = job_choice(target, department, sites, 'manage_transfer_job_' + target + '_' + department) if department else None

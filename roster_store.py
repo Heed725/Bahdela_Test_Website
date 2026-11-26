@@ -26,9 +26,23 @@ class RosterStore:
             db.execute('CREATE TABLE IF NOT EXISTS changes (site TEXT, name_key TEXT, record TEXT, PRIMARY KEY(site,name_key))')
             db.execute('CREATE TABLE IF NOT EXISTS departments (site TEXT, name_key TEXT, name TEXT, config TEXT, PRIMARY KEY(site,name_key))')
             db.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, timestamp TEXT DEFAULT CURRENT_TIMESTAMP, actor TEXT, action TEXT, employee_id TEXT, name TEXT, source TEXT, destination TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS terminal_rosters (site TEXT PRIMARY KEY, synced_at TEXT NOT NULL, employees TEXT NOT NULL)')
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=30)
+
+    def save_terminal_roster(self, site, users):
+        employees = [{'employeeNo': str(user['employeeNo']), 'name': user.get('name', '')} for user in users]
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO terminal_rosters VALUES (?, CURRENT_TIMESTAMP, ?)',
+                       (site, json.dumps(employees)))
+
+    def load_terminal_roster(self, site):
+        with self.connect() as db:
+            row = db.execute('SELECT synced_at, employees FROM terminal_rosters WHERE site = ?', (site,)).fetchone()
+        if row is None:
+            return None
+        return row[0], json.loads(row[1])
 
     def save(self, actor, action, employee_id, name, source=None, destination=None, department=None, old_name=None, job=None):
         # Both sides of a transfer are committed in one database transaction.
