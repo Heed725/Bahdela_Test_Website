@@ -246,7 +246,7 @@ class InterfaceTests(unittest.TestCase):
                                  'Mnyeto Miraji Rashidi · ID 1365 · Security · SECURITY')
                 at.selectbox(key='manage_transfer_source').select('Puma Upanga').run()
                 at.button(key='manage_transfer_Puma Upanga_refresh').click().run()
-                options = at.selectbox(key='manage_transfer_Puma Upanga_choice').options
+                options = at.radio(key='manage_transfer_Puma Upanga_choice').options
                 self.assertEqual(len(options), 3)
                 for user in terminal.users.values():
                     self.assertTrue(any(user['name'] in option for option in options))
@@ -331,7 +331,7 @@ class InterfaceTests(unittest.TestCase):
                     at.selectbox(key='manage_transfer_source').select('Buguruni').run()
                     self.assertIn('Offline Test Employee', at.checkbox(key='manage_delete_Buguruni_tick_00801').label)
                     self.assertIn('00801 · Offline Test Employee · Shop · SHOP',
-                                  at.selectbox(key='manage_transfer_Buguruni_choice').options)
+                                  at.radio(key='manage_transfer_Buguruni_choice').options)
                     if refresh_online:
                         search.assert_not_called()
                     else:
@@ -377,7 +377,7 @@ class InterfaceTests(unittest.TestCase):
                 self.assertFalse(any(c.key == 'manage_delete_Buguruni_tick_99999' for c in at.checkbox))
                 at.selectbox(key='manage_transfer_source').select('Buguruni').run()
                 at.button(key='manage_transfer_Buguruni_refresh').click().run()
-                self.assertEqual(at.selectbox(key='manage_transfer_Buguruni_choice').options, ['98765 · UI Test Person · Shop · SHOP'])
+                self.assertEqual(at.radio(key='manage_transfer_Buguruni_choice').options, ['98765 · UI Test Person · Shop · SHOP'])
                 at.checkbox(key='manage_delete_Buguruni_tick_98765').check().run()
                 at.button(key='manage_delete_Buguruni_submit').click().run()
                 self.assertFalse(at.exception)

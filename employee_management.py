@@ -344,14 +344,26 @@ def load_report_users(site, sites, store, key, clear_ticks=False):
     return users
 
 
+def search_report_users(users, key):
+    if not users:
+        return []
+    query = normalized(st.text_input('Search by name or employee ID', key=key + '_search'))
+    matches = [user for user in users if query in normalized(user['name']) or query in user['employeeNo']]
+    if not matches:
+        st.info('No employees match your search.')
+    return matches
+
+
 def selected_employee(site, sites, store, key):
-    users = load_report_users(site, sites, store, key)
+    users = search_report_users(load_report_users(site, sites, store, key), key)
     if not users:
         return None
-    choice = st.selectbox('Employee', [str(u['employeeNo']) for u in users], index=None,
-        format_func=lambda employee_id: next(f"{u['employeeNo']} · {u['name']} · {u['department']} · {u['job']}"
-                                             for u in users if str(u['employeeNo']) == employee_id), key=key + '_choice')
-    return next((u for u in users if str(u['employeeNo']) == choice), None)
+    users_by_id = {user['employeeNo']: user for user in users}
+    labels = {user['employeeNo']: f"{user['employeeNo']} · {user['name']} · {user['department']} · {user['job']}"
+              for user in users}
+    choice = st.radio('Select an employee to transfer', list(users_by_id), index=None,
+                      format_func=labels.__getitem__, key=key + '_choice')
+    return users_by_id.get(choice)
 
 
 def render_delete_list(site, sites, store):
@@ -364,13 +376,8 @@ def render_delete_list(site, sites, store):
         for failure in results['failed']:
             employee = failure['employee']
             st.error(f"{employee['name']} (ID {employee['employeeNo']}): {failure['error']}")
-    users = load_report_users(site, sites, store, key, clear_ticks=True)
+    users = search_report_users(load_report_users(site, sites, store, key, clear_ticks=True), key)
     if not users:
-        return
-    query = normalized(st.text_input('Search by name or employee ID', key=key + '_search'))
-    users = [user for user in users if query in normalized(user['name']) or query in user['employeeNo']]
-    if not users:
-        st.info('No employees match your search.')
         return
     st.write('Tick the employees who should be removed from this location.')
     selected = []
