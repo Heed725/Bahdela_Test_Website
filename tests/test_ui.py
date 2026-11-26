@@ -317,6 +317,7 @@ class InterfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'ROSTER_DB_PATH': folder + '/roster.db'}):
             store = RosterStore(folder + '/roster.db')
             store.save('HR', 'add', '00801', 'Offline Test Employee', destination='Buguruni', department='Shop')
+            store.save('HR', 'add', '', 'Offline Name Only', destination='Buguruni', department='Shop')
             entrypoint = str(Path(__file__).parents[1] / 'App.py')
             with patch('employee_management.client_for') as terminal:
                 search = terminal.return_value.search_users
@@ -334,6 +335,8 @@ class InterfaceTests(unittest.TestCase):
                                   at.radio(key='manage_transfer_Buguruni_choice').options)
                     if refresh_online:
                         search.assert_not_called()
+                        self.assertEqual(sum('Offline Name Only' in table.value['Name'].tolist()
+                                             for table in at.dataframe if 'Name' in table.value.columns), 2)
                     else:
                         search.assert_called_once()
                         search.side_effect = HikvisionError('Terminal unavailable')
@@ -378,11 +381,15 @@ class InterfaceTests(unittest.TestCase):
                 at.selectbox(key='manage_transfer_source').select('Buguruni').run()
                 at.button(key='manage_transfer_Buguruni_refresh').click().run()
                 self.assertEqual(at.radio(key='manage_transfer_Buguruni_choice').options, ['98765 · UI Test Person · Shop · SHOP'])
+                self.assertEqual(sum('Unlisted Terminal Person' in table.value['Name'].tolist()
+                                     for table in at.dataframe if 'Name' in table.value.columns), 2)
                 at.checkbox(key='manage_delete_Buguruni_tick_98765').check().run()
                 at.button(key='manage_delete_Buguruni_submit').click().run()
                 self.assertFalse(at.exception)
                 self.assertNotIn('98765', terminal.users)
                 self.assertIn('99999', terminal.users)
+                self.assertEqual(RosterStore(folder+'/roster.db').load_terminal_roster('Buguruni')[1],
+                                 [{'employeeNo': '99999', 'name': 'Unlisted Terminal Person'}])
                 self.assertEqual(RosterStore(folder+'/roster.db').history()[0]['action'], 'delete')
                 next(b for b in at.button if b.label == 'Log out').click().run()
                 self.assertFalse(at.exception)

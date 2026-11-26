@@ -49,10 +49,23 @@ class RosterStore:
         with self.connect() as db:
             if source:
                 self._put(db, source, old_name or name, {'deleted': True, 'employee_id': employee_id})
+                self._update_terminal_roster(db, source, employee_id)
             if destination:
                 self._put(db, destination, name, {'name': name, 'employee_id': employee_id, 'department': department, 'job': job})
+                self._update_terminal_roster(db, destination, employee_id, name)
             db.execute('INSERT INTO audit(actor,action,employee_id,name,source,destination) VALUES (?,?,?,?,?,?)',
                        (actor, action, employee_id, name, source, destination))
+
+    @staticmethod
+    def _update_terminal_roster(db, site, employee_id, name=None):
+        row = db.execute('SELECT employees FROM terminal_rosters WHERE site = ?', (site,)).fetchone()
+        if row is None:
+            return
+        employee_id = str(employee_id)
+        employees = [user for user in json.loads(row[0]) if user['employeeNo'] != employee_id]
+        if name is not None:
+            employees.append({'employeeNo': employee_id, 'name': name})
+        db.execute('UPDATE terminal_rosters SET employees = ? WHERE site = ?', (json.dumps(employees), site))
 
     @staticmethod
     def _put(db, site, name, record):

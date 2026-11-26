@@ -330,18 +330,18 @@ def load_report_users(site, sites, store, key, clear_ticks=False):
                         st.session_state.pop(widget_key, None)
     snapshot = store.load_terminal_roster(site)
     if snapshot is None:
-        roster_users = [employee for employee in report_employees(site, sites) if employee['employeeNo']]
-        users = filter_report_users(roster_users, site, sites)
-        if not users:
-            st.info('No employees with a saved employee ID are available for this station.')
-        return users
-    synced_at, loaded = snapshot
-    local_time = datetime.fromisoformat(synced_at).replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3)))
-    st.caption(f'Saved employee list · Last synced {local_time:%d %b %Y, %H:%M} EAT')
-    users = filter_report_users(loaded, site, sites)
-    if not users:
-        st.info('No matching report-roster employees were found on this terminal.')
-    return users
+        loaded = report_employees(site, sites)
+    else:
+        synced_at, loaded = snapshot
+        local_time = datetime.fromisoformat(synced_at).replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=3)))
+        st.caption(f'Saved employee list · Last synced {local_time:%d %b %Y, %H:%M} EAT')
+    if not loaded:
+        st.info('No employees are listed for this station.')
+        return []
+    managed = {user['employeeNo']: user for user in filter_report_users(
+        [user for user in loaded if user['employeeNo']], site, sites)}
+    return [managed.get(user['employeeNo'], user) for user in sorted(
+        loaded, key=lambda user: (normalized(user['name']), user['employeeNo']))]
 
 
 def search_report_users(users, key):
@@ -351,7 +351,15 @@ def search_report_users(users, key):
     matches = [user for user in users if query in normalized(user['name']) or query in user['employeeNo']]
     if not matches:
         st.info('No employees match your search.')
-    return matches
+    other_employees = [
+        {'Name': user['name'], 'Employee ID': user['employeeNo'],
+         'Status': 'Report assignment required' if user['employeeNo'] else 'Employee ID required'}
+        for user in matches if 'roster_name' not in user
+    ]
+    if other_employees:
+        st.caption('Other station employees')
+        st.dataframe(other_employees, hide_index=True)
+    return [user for user in matches if 'roster_name' in user]
 
 
 def selected_employee(site, sites, store, key):
